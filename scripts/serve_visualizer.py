@@ -245,10 +245,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   <div class="tabs">
     <div class="tab active" onclick="switchTab('compare_difix', this)">✨ 1. 原生 720p 高清对比（对齐特斯拉构图）</div>
-    <div class="tab" onclick="switchTab('timeline', this)">🔥 2. 同步时间轴回放（4面板 · 多帧 3D Cache）</div>
-    <div class="tab" onclick="switchTab('orbit', this)">3. 实时 360° 自由视角（支持 720p / 1080p）</div>
-    <div class="tab" onclick="switchTab('compare_front', this)">4. 前视原图 vs 自研3DGS</div>
-    <div class="tab" onclick="switchTab('benchmarks', this)">5. v1 显存与实测指标</div>
+    <div class="tab" onclick="switchTab('instant_nurec', this)">⚡ 2. Instant-NuRec 实测对比（零离线地图）</div>
+    <div class="tab" onclick="switchTab('timeline', this)">🔥 3. 同步时间轴回放（4面板 · 多帧 3D Cache）</div>
+    <div class="tab" onclick="switchTab('orbit', this)">4. 实时 360° 自由视角（支持 720p / 1080p）</div>
+    <div class="tab" onclick="switchTab('compare_front', this)">5. 前视原图 vs 自研3DGS</div>
+    <div class="tab" onclick="switchTab('benchmarks', this)">6. v1 显存与实测指标</div>
   </div>
 
   <!-- SECTION 0 (DEFAULT): 720p HD TESLA-ALIGNED CURTAIN -->
@@ -275,6 +276,55 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
         <div class="imglabel" id="lblCurtainLeft" style="top:10px; left:10px">裸 NuRec 3DGS（720p 原图）</div>
         <div class="imglabel badge-purple" id="lblCurtainRight" style="top:10px; left:auto; right:10px">✨ Difix3D+ 720p + 无损 4×MSAA PBR 自车 + 柔光蓝带</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION: INSTANT-NUREC ZERO-OFFLINE-MAP BENCHMARK -->
+  <div id="sec-instant_nurec" class="section">
+    <div class="card">
+      <h2>
+        <span>⚡ NVIDIA Instant-NuRec (0.68GB) 零离线地图 / 零训练实测对比（Frame 9 · t=4.05s · 720p）</span>
+        <span class="sub" id="inurecSub">仅输入 5 路因果环视相机画面（504×280）— 6帧 867ms / 3.86GB 显存 · 12帧 1.73s / 6.81GB 显存</span>
+      </h2>
+      <div class="controls">
+        <button id="btnInurecVsGt" class="primary" onclick="setInurecMode('vs_gt')">⚡ 零训练成品（Instant-NuRec+Difix） vs 离线 NuRec GT</button>
+        <button id="btnInurecVsDa3" onclick="setInurecMode('vs_da3')">🔥 旧 Branch A（DA3 点云） vs Instant-NuRec 原始 3DGS</button>
+        <span style="font-size:13px; margin-left:6px">卷帘位置：</span>
+        <input type="range" id="splitInurec" min="0" max="100" value="50" style="flex:1; min-width:140px" oninput="setSplit('inurec', this.value)" />
+      </div>
+      <div class="compare-wrap" id="wrap-inurec">
+        <img id="inurecRight" src="/assets/chase_difix_0008.jpg" alt="Instant-NuRec right" />
+        <div class="compare-top" id="top-inurec" style="width:50%">
+          <img id="inurecLeft" src="/assets/inurec_difix_720p.jpg" alt="Instant-NuRec left" />
+        </div>
+        <div class="imglabel badge-cyan" id="lblInurecLeft" style="top:10px; left:10px">⚡ Instant-NuRec + Difix3D+ + PBR 自车（零离线地图 / 零训练）</div>
+        <div class="imglabel badge-purple" id="lblInurecRight" style="top:10px; left:auto; right:10px">🎯 离线 NuRec 26.10 GT + Difix3D+（70 分钟离线精建）</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>
+        <span>四图同屏高清对比（点击任意图片可在新标签页看 1280×720 原图）</span>
+        <span class="sub">覆盖率：DA3 点云 ~91% → Instant-NuRec 前馈 3DGS 96.1%</span>
+      </h2>
+      <div class="grid2">
+        <div class="imgbox">
+          <div class="imglabel">① 旧 Branch A：DA3 多帧点云缓存（锯齿与黑洞明显）</div>
+          <a href="/assets/coarse_cache_0008.jpg" target="_blank"><img src="/assets/coarse_cache_0008.jpg" alt="DA3 multi-frame cache" /></a>
+        </div>
+        <div class="imgbox">
+          <div class="imglabel badge-cyan">② Instant-NuRec 原始 3DGS（0.68GB · 1.73s · 覆盖率 96.1%）</div>
+          <a href="/assets/inurec_raw_720p.jpg" target="_blank"><img src="/assets/inurec_raw_720p.jpg" alt="Instant-NuRec raw" /></a>
+        </div>
+        <div class="imgbox">
+          <div class="imglabel badge-purple">③ Instant-NuRec + Difix3D+ + PBR 自车（零离线地图 / 零训练）</div>
+          <a href="/assets/inurec_difix_720p.jpg" target="_blank"><img src="/assets/inurec_difix_720p.jpg" alt="Instant-NuRec + Difix3D+" /></a>
+        </div>
+        <div class="imgbox">
+          <div class="imglabel" style="color:#6ee7b7">④ 离线 NuRec 26.10 GT + Difix3D+（70 分钟离线扫描真值）</div>
+          <a href="/assets/chase_difix_0008.jpg" target="_blank"><img src="/assets/chase_difix_0008.jpg" alt="Offline NuRec GT" /></a>
+        </div>
       </div>
     </div>
   </div>
@@ -631,8 +681,25 @@ async function requestLiveRender() {
   });
 })();
 
+function setInurecMode(mode) {
+  document.getElementById('btnInurecVsGt').classList.toggle('primary', mode === 'vs_gt');
+  document.getElementById('btnInurecVsDa3').classList.toggle('primary', mode === 'vs_da3');
+  if (mode === 'vs_da3') {
+    document.getElementById('inurecLeft').src = '/assets/coarse_cache_0008.jpg';
+    document.getElementById('inurecRight').src = '/assets/inurec_raw_720p.jpg';
+    document.getElementById('lblInurecLeft').textContent = '① 旧 Branch A：DA3 多帧点云缓存（大量黑洞锯齿）';
+    document.getElementById('lblInurecRight').textContent = '② Instant-NuRec 前馈 3DGS（0.68GB · 覆盖率 96.1%）';
+  } else {
+    document.getElementById('inurecLeft').src = '/assets/inurec_difix_720p.jpg';
+    document.getElementById('inurecRight').src = '/assets/chase_difix_0008.jpg';
+    document.getElementById('lblInurecLeft').textContent = '③ Instant-NuRec + Difix3D+（零离线地图 / 零训练）';
+    document.getElementById('lblInurecRight').textContent = '④ 离线 NuRec 26.10 GT + Difix3D+（70 分钟离线精建）';
+  }
+  syncCompareWidths();
+}
+
 function syncCompareWidths() {
-  for (const key of ['difix', 'front']) {
+  for (const key of ['difix', 'front', 'inurec']) {
     const wrap = document.getElementById('wrap-' + key);
     const leftImg = document.getElementById(key + 'Left');
     if (wrap && leftImg && wrap.clientWidth > 0) {

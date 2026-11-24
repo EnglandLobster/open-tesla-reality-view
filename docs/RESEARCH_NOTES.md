@@ -102,11 +102,28 @@ flowchart LR
 ### 演进式架构策略（v1 → v2）
 我们的 Branch A 接口只约定输出 `(coarse_rgb, hole_mask, target_depth)`：
 - **v1（当前务实落地）**：走 **流派二**（`DA3 + Temporal3DCache` + `Alpamayo2-Edge` + `Wan2.1-VACE`），低算力快速跑出高清效果。
-- **v2（平滑切换至流派四）**：待开源前馈 3DGS（如 `DrivingForward` / `Omni-Scene` 或后续开源的 `STORM` / `Instant NuRec`）成熟接入后，可直接**热插拔替换 Branch A 的点云缓存**，并结合 `Causal-Forcing` 1–2 步蒸馏实现车端级实时流式渲染。
+- **v2（平滑切换至流派四）**：已于本地 RTX 3080 20GB 实测跑通 **`nvidia/instant-nurec`**（见第 6 节），可直接**热插拔替换 Branch A 的点云缓存**，并结合 `Causal-Forcing` 1–2 步蒸馏实现车端级实时流式渲染。
 
 ---
 
-## 5. 关键渲染与工程排障记录（已解决）
+## 5. 开源世界模型与前馈 3DGS 实测验证（2026 年底 Hugging Face 核验）
+
+| 模型（Hugging Face ID，均已实测 `gated=False`） | 参数量 / 权重体积 | 本地 RTX 3080 20GB 实测可行性 | 工程定位 |
+| :--- | :---: | :--- | :--- |
+| **`nvidia/instant-nurec`** (`pa-multiview`) 🔥 | `202M` / **`0.68 GB`** | **✅ 已实测跑通！**<br>• 5路×6帧 (30图)：**`867 ms` / 显存增量 `3.86 GB`**，覆盖率 **`95.5%`**<br>• 5路×12帧 (60图)：**`1.73 s` / 显存增量 `6.81 GB`**，覆盖率 **`96.1%`**<br>• 免费自带 5 类语义分割 + 观测天空盒 | **超级 Branch A 底座候选**（从 DA3 满屏黑洞跃升至 `96.1%` 完整 3DGS 半成品）；也可用于将普通多相机视频秒级转成 3DGS 扩充数据源 |
+| **`nvidia/GEN3C-Cosmos-7B`** | `7B` / `26.96 GB` | **❌ 3080 跑不动**（全卸载仍需 `~43 GB VRAM`，需 A100/H100 80GB） | 留到 Colab A100 80GB 阶段作为离线视频级精修 Teacher 对比 `Difix3D+` |
+| **`depth-anything/DA3-GIANT-1.1`** / **`tencent/HY-World-2.0`** | ~1.2B | 可评估 | 通用静态 3D 重建强，动态车辆拆分不如 `Instant-NuRec` 专业 |
+| **`KlingTeam/ReCamMaster-Wan2.1`** / **`TrajectoryCrafter`** | 1.3B–5B | 单目转视角 | 盲区易幻觉，不适合直接造自动驾驶 GT；`ReCamMaster-Wan2.1` 相机控制注入设计可参考 |
+
+### `Instant-NuRec` 零离线地图 / 零训练实测核心结论
+- **实测方法**：仅输入 5 路因果环视图像（`504×280`，全为当前与过去帧，零离线 3D 地图、零未来帧），经 `Instant-NuRec` (`pa-multiview`) 现场生成 3D 高斯 → `triton_3dgs.py` 渲染 720p → `Difix3D+` 单步精修 → 后置 4× MSAA PBR 自车与蓝毯。
+- **关键观察**：
+  1. 主车道、双黄线、树木、红木围墙、前方 SUV 刹车灯及蓝毯轨迹在**零训练、零离线地图**下已逼近 70 分钟离线 NuRec 真值；
+  2. 右下角近处路边停放车辆因 `504×280` 边缘畸变在原始 3DGS 中轻微变形，未微调的通用 `Difix3D+` 无法依据 6 路高清原图纠偏——**恰好验证了“用 `Instant-NuRec` 做第 1 棒几何底座 + 用离线 `NuRec 26.10 GT` 微调 `Alpamayo + Wan2.1-VACE` 做第 2 棒语义纠偏精修”的黄金组合**。
+
+---
+
+## 6. 关键渲染与工程排障记录（已解决）
 
 1. **NuRec 时序傅里叶 Albedo 发灰洗白**（commit `a3adc4b`）
    - 根因：NuRec 26.10 `features_albedo` 形状为 `[N, K, 3]`，索引 `0` 为常值 DC 基色，`1..K-1` 为零均值时序谐波（对静态/部分动态体为 0）；此前取 `mean(dim=1)` 导致颜色被衰减 5×–20×。
