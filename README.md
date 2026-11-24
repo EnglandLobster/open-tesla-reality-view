@@ -38,7 +38,7 @@ K Surround Cameras (6-7 views) + Intrinsics/Extrinsics + Target Chase-Cam Pose
         Photorealistic Third-Person Reality View Stream
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full mathematical specifications, Stage 0 data construction (`PhysicalAI-Autonomous-Vehicles-NuRec`, `OmniRe + Difix3D+`, `CARLA`), and the 500–600 A100h training budget.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full mathematical specifications, [docs/DATA_PIPELINE.md](docs/DATA_PIPELINE.md) for Stage 0 data construction (`PhysicalAI-Autonomous-Vehicles-NuRec`, `OmniRe + Difix3D+`, `CARLA`), and [docs/RESEARCH_NOTES.md](docs/RESEARCH_NOTES.md) for the end-to-end Tesla FSD v15 comparison, GT audit, 2024–2026 academic SOTA survey, and key 3DGS rendering fixes.
 
 ## Verified Hardware Benchmarks (RTX 3080 20GB, BF16)
 
