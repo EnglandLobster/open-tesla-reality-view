@@ -31,6 +31,7 @@ from open_reality_view.models import (
     pack_vace_control_tensor,
     pack_vace_mask,
 )
+from open_reality_view.rendering import render_gaussians_triton
 
 
 def test_config_dimensions_match_verified_upstream_specs() -> None:
@@ -261,3 +262,35 @@ def test_end_to_end_vace_flow_matching_step_and_gradients() -> None:
 
     assert model.context_adapter.out_proj.weight.grad is not None
     assert model.transformer.latent_proj.weight.grad is None
+
+
+def test_zero_compiler_3dgs_rasterizer_renders_visible_gaussian_and_depth() -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    means = torch.tensor([[0.0, 0.0, 5.0]], device=device)
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device)
+    scales = torch.tensor([[0.6, 0.6, 0.6]], device=device)
+    opacities = torch.tensor([0.95], device=device)
+    # SH DC coeff for pure bright red: (1.0 - 0.5) / C0 ~ 1.77
+    sh_dc = torch.tensor([[1.77, -1.77, -1.77]], device=device)
+    c2w = torch.eye(4, device=device)
+    k = torch.tensor([[64.0, 0.0, 32.0], [0.0, 64.0, 32.0], [0.0, 0.0, 1.0]], device=device)
+
+    out = render_gaussians_triton(
+        means=means,
+        quats_wxyz=quats,
+        scales=scales,
+        opacities=opacities,
+        sh_dc=sh_dc,
+        sh_rest=None,
+        c2w=c2w,
+        intrinsics=k,
+        height=64,
+        width=64,
+    )
+    assert out.rgb.shape == (64, 64, 3)
+    assert out.depth.shape == (64, 64)
+    assert out.alpha.shape == (64, 64)
+    assert out.alpha[32, 32].item() > 0.85
+    assert out.rgb[32, 32, 0].item() > 0.85
+    assert out.rgb[32, 32, 2].item() < 0.1
+    assert out.depth[32, 32].item() == pytest.approx(5.0, abs=0.2)

@@ -60,13 +60,28 @@ python scripts/precache_features.py \
 
 ### Tier 1 (Primary Real-World): `nvidia/PhysicalAI-Autonomous-Vehicles-NuRec`
 
-- **Why Primary:** `nvidia/PhysicalAI-Autonomous-Vehicles-NuRec` (`26.10` release) provides **1,601 pre-reconstructed 20-second 7-camera 3D neural driving scenes** (`.usdz` 3DGUT + `.xodr` HD maps + surface meshes) — the exact dataset ecosystem `nvidia/Alpamayo2-Edge` was trained on.
-- **Workflow:**
-  1. Request instant auto-approval on Hugging Face: `https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec`.
-  2. Render synchronized 6–7 ego surround views + randomized third-person chase/orbit cameras (`build_chase_camera_pose` / `build_orbit_chase_pose`) from each `.usdz` scene using NVIDIA NuRec / `3DGRUT`.
-  3. Composite a physically lit 3D ego-car mesh (or use `EgoVehicleCompositor`) to fill the sensor blind-spot ego-car hole.
-  4. Run single-step **`Difix3D+`** over high-elevation chase renders to strip roof/occlusion floaters before saving to `chase_gt/`.
-  5. Run `scripts/estimate_depth_da3.py` on `surround/` (or export rendered depth directly from NuRec) and pre-cache with `scripts/precache_features.py`.
+- **Why Primary:** `nvidia/PhysicalAI-Autonomous-Vehicles-NuRec` (`26.10` release) provides **1,601 pre-reconstructed 20-second 7-camera 3D neural driving scenes** (`.usdz` containing standard PyTorch 3DGS `checkpoint.ckpt` + `rig_trajectories.json` + `sequence_tracks.json` + 6-face skybox cubemap), of which **1,248 scenes achieve ≥ 27 dB PSNR** — the exact dataset ecosystem `nvidia/Alpamayo2-Edge` was trained on.
+- **Zero-Omniverse Direct Rendering (`src/open_reality_view/data/nurec_renderer.py`):**
+  - Renders static `background` + `road` + 6-DoF rigid-transformed `dynamic_rigids` vehicles + Y-up cubemap skybox directly on any CUDA GPU via our zero-compiler Triton / PyTorch 3DGS tile rasterizer, and composites a watertight 3D fastback ego sedan aligned to NuRec's exact `rig_bbox`.
+- **Single-Scene & Batch Export Commands:**
+  ```bash
+  # 1. Authenticate with Hugging Face after accepting the dataset license
+  hf auth login
+
+  # 2. Batch-export top-PSNR scenes (automatically balances day/night & exports 3 orbit angles per scene)
+  python scripts/batch_export_nurec.py \
+    --max-scenes 100 \
+    --min-psnr 28.0 \
+    --day-ratio 0.7 \
+    --num-frames 17 \
+    --orbit-angles 0 -20 20 \
+    --out-clips-dir data/nurec_clips
+
+  # 3. Pre-cache frozen Alpamayo2-Edge + Wan2.1 VAE / VACE control shards for Colab training
+  python scripts/precache_features.py \
+    --clips-dir data/nurec_clips \
+    --out-dir data/cached_shards_nurec
+  ```
 
 ### Tier 2: `CARLA` Synthetic Chase-Camera Benchmark & `nuScenes` / `Waymo` (`OmniRe`)
 
