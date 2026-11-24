@@ -12,14 +12,14 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
-# Data, checkpoints, and media artifacts
-data/
-datasets/
-checkpoints/
-weights/
-outputs/
-runs/
-wandb/
+# Data, checkpoints, and media artifacts (anchored to repo root so src/.../data/ stays tracked)
+/data/
+/datasets/
+/checkpoints/
+/weights/
+/outputs/
+/runs/
+/wandb/
 *.ckpt
 *.pt
 *.pth
