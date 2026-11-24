@@ -1,0 +1,75 @@
+# v1 Quality-First Configuration: Alpamayo2-Edge + DA3 + Wan2.1-VACE-1.3B
+
+experiment:
+  name: "v1_alpamayo2_edge_wan21_vace"
+  seed: 42
+  precision: "bfloat16"
+
+data:
+  num_cameras: 6
+  camera_names:
+    - "cam_front"
+    - "cam_front_left"
+    - "cam_front_right"
+    - "cam_back"
+    - "cam_back_left"
+    - "cam_back_right"
+  target_height: 480
+  target_width: 832
+  clip_num_frames: 49          # 1 + 4*12 -> 13 Wan latent frames
+  fps: 16
+  # Virtual chase camera default offset in ego frame (x=forward, y=left, z=up, meters)
+  default_chase_offset_xyz: [-7.5, 0.0, 4.2]
+  default_chase_pitch_deg: -18.0
+  # Ego vehicle physical bounding box (L, W, H in meters) for placeholder/masking
+  ego_box_lwh: [4.72, 1.85, 1.44]
+
+encoder:
+  type: "alpamayo2_edge"       # Pluggable: alpamayo2_edge | dm0 | dinov3
+  model_id: "nvidia/Alpamayo2-Edge"
+  freeze: true
+  vision_hidden_size: 1152     # Verified from nvidia/Alpamayo2-Edge config.json
+  patch_size: 16
+  spatial_merge_size: 2
+  enable_policy_branch: false  # Set true for dual-branch trajectory overlay demo
+
+geometry:
+  depth_model_id: "depth-anything/DA3-BASE"
+  freeze: true
+  splat_radius_px: 1
+  min_depth_m: 0.5
+  max_depth_m: 120.0
+  # Randomly drop coarse 3D conditioning during training to force semantic reliance
+  coarse_rgb_dropout_prob: 0.15
+
+context_adapter:
+  num_latents: 256             # Cross-attention sequence length fed to Wan2.1
+  adapter_dim: 1152
+  output_dim: 4096             # Verified Wan2.1-VACE-1.3B text_dim
+  num_layers: 4
+  num_heads: 16
+  plucker_freq_bands: 6
+  dropout: 0.05
+
+generator:
+  model_id: "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
+  vae_spatial_stride: 8
+  vae_temporal_stride: 4
+  latent_channels: 16
+  vace_in_channels: 96         # Verified Wan2.1-VACE-1.3B config.json
+  vace_context_scale: 1.0
+  flow_shift: 3.0              # 3.0 for 480p, 5.0 for 720p
+  v1_inference_steps: 25
+  guidance_scale: 1.0          # Conditional CFG optional; 1.0 for pure conditional speed
+  lora_rank: 64
+  lora_alpha: 64
+  train_vace_blocks: true
+
+training:
+  stage1a_steps: 5000          # Adapter warmup (DiT frozen)
+  stage1b_steps: 25000         # Joint VACE + DiT LoRA / full FT
+  learning_rate_adapter: 1.0e-4
+  learning_rate_dit: 2.0e-5
+  weight_decay: 1.0e-2
+  grad_clip_norm: 1.0
+  gradient_checkpointing: true

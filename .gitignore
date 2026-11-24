@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Data, checkpoints, and media artifacts
+data/
+datasets/
+checkpoints/
+weights/
+outputs/
+runs/
+wandb/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.onnx
+*.usdz
+*.mp4
+*.avi
+*.mov
+*.gif
+
+# Notebooks & editors
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+*.log
