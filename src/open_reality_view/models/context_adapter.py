@@ -133,12 +133,13 @@ class AlpamayoContextAdapter(nn.Module):
         """
         bsz, num_frames, num_cams, h_p, w_p, _ = vision_tokens.shape
         device = vision_tokens.device
+        param_dtype = self.out_proj.weight.dtype
 
-        x = self.in_proj(vision_tokens)  # [B, T, K, H_p, W_p, adapter_dim]
+        x = self.in_proj(vision_tokens.to(dtype=param_dtype))  # [B, T, K, H_p, W_p, adapter_dim]
 
         if plucker_rays is not None:
             ray_feats = self.plucker_encoder(plucker_rays.movedim(-3, -1))
-            x = x + ray_feats
+            x = x + ray_feats.to(dtype=x.dtype)
 
         if camera_ids is None:
             cam_idx = torch.arange(num_cams, device=device)

@@ -94,11 +94,11 @@ class FourierPluckerEncoder(nn.Module):
 
     def forward(self, plucker: torch.Tensor) -> torch.Tensor:
         """Encode Plücker rays of shape ``[..., 6]`` into ``[..., out_dim]``."""
-        orig_dtype = plucker.dtype
+        target_dtype = self.proj[0].weight.dtype
         x = plucker.float()
         angles = x.unsqueeze(-1) * self.freqs  # [..., 6, F]
         encoded = torch.cat(
             [x, torch.sin(angles).flatten(-2), torch.cos(angles).flatten(-2)],
             dim=-1,
         )
-        return self.proj(encoded.to(orig_dtype))
+        return self.proj(encoded.to(dtype=target_dtype))

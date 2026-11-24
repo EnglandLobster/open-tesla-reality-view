@@ -40,21 +40,34 @@ K Surround Cameras (6-7 views) + Intrinsics/Extrinsics + Target Chase-Cam Pose
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full mathematical specifications, Stage 0 data construction (`PhysicalAI-Autonomous-Vehicles-NuRec`, `OmniRe + Difix3D+`, `CARLA`), and the 500–600 A100h training budget.
 
+## Verified Hardware Benchmarks (RTX 3080 20GB, BF16)
+
+Measured locally with **real pretrained weights** (`nvidia/Alpamayo2-Edge` 437-key strict SigLIP2 vision tower + `Wan-AI/Wan2.1-VACE-1.3B-diffusers` DiT & VAE + `AlpamayoContextAdapter`, zero UMT5 text encoder):
+
+| Workload | Resolution & Frames | Peak VRAM | Wall Time |
+| :--- | :--- | :---: | :---: |
+| Frozen `Alpamayo2-Edge` Vision Tower only | — | **0.78 GB** | 6.0 s load |
+| Full v1 Stack Loaded (`Alpamayo2` + `Wan2.1-VACE` + `VAE` + `Adapter`) | — | **5.21 GB** | 8.3 s load |
+| Stage 1A Training (Fwd + Bwd, gradient ckpt) | `9f @ 256×448` | **6.28 GB** | 2.13 s / step |
+| Stage 1A Training (Fwd + Bwd, gradient ckpt) | `17f @ 480×832` | **9.04 GB** | 7.96 s / step |
+| Flow-Matching Inference (2 steps) | `9f @ 256×448` | **6.60 GB** | 1.23 s |
+| Flow-Matching Inference (4 steps) | `17f @ 480×832` | **10.10 GB** | 9.17 s |
+
 ## Roadmap
 
-- [x] **Milestone 0 — Architecture & Core Bridge Skeleton**
-  - Pluggable `SharedVisionEncoder` interface & `Alpamayo2EdgeVisionEncoder` wrapper
-  - Multi-camera `PluckerRayEncoder` & differentiable z-buffer `MultiViewProjector`
+- [x] **Milestone 0 — Architecture & Real-Weight Verified Core Bridge**
+  - Exact 437-tensor strict loader for `nvidia/Alpamayo2-Edge` SigLIP2 vision tower + `(P, P, C)` patchify
+  - Multi-camera `PluckerRayEncoder`, z-buffer `MultiViewDepthProjector`, and 3D `EgoVehicleCompositor`
   - `AlpamayoContextAdapter` (`1152 → 4096`) bridging frozen Alpamayo2-Edge tokens into `WanVACETransformer3DModel`
-  - Unit tests verifying exact tensor contracts without downloading multi-GB weights
-- [ ] **Milestone 1 — Stage 0 Third-Person GT Data Pipeline**
-  - `nvidia/PhysicalAI-Autonomous-Vehicles-NuRec` (1,601 pre-reconstructed 3DGS driving scenes) renderer + 3D Ego-Car compositor
+  - Real-weight RTX 3080 20GB smoke test (`scripts/smoke_real_weights.py`), pre-cacher (`scripts/precache_features.py`), Stage 1A / 1B training (`scripts/train_v1.py`), inference (`scripts/infer_v1.py`), and Colab notebook (`notebooks/colab_train_v1.ipynb`)
+- [ ] **Milestone 1 — Stage 0 Real-World Data Ingestion (`NuRec` + `CARLA`)**
+  - `nvidia/PhysicalAI-Autonomous-Vehicles-NuRec` (1,601 pre-reconstructed 3DGS driving scenes) renderer + 3D Ego-Car compositor + `Difix3D+` artifact cleaner (see [docs/DATA_PIPELINE.md](docs/DATA_PIPELINE.md))
   - `CARLA` synthetic cold-start pipeline (zero-hole third-person chase camera GT)
-  - Optional `OmniRe` (`drivestudio`) + `Difix3D+` artifact cleaner for `nuScenes` / `Waymo`
+  - Optional `OmniRe` (`drivestudio`) + `Difix3D+` benchmark transfer on `nuScenes` / `Waymo`
 - [ ] **Milestone 2 — v1 Quality-First Training (Colab A100 / PRO 6000 / H100)**
-  - Pre-cache frozen Alpamayo2-Edge vision tokens & Wan-VAE latents
-  - Train `AlpamayoContextAdapter` + high-rank LoRA / full fine-tuning on `Wan2.1-VACE-1.3B`
-  - Demo inference + interactive camera orbiting on RTX 3080 20GB
+  - Pre-cache frozen Alpamayo2-Edge vision tokens & Wan-VAE latents (~60 GB for 2,000 clips)
+  - Train `AlpamayoContextAdapter` (Stage 1A) + high-rank LoRA / full fine-tuning on `Wan2.1-VACE-1.3B` (Stage 1B)
+  - High-fidelity v1 demo videos + interactive camera orbiting on RTX 3080 20GB
 - [ ] **Milestone 3 — v2 Real-Time Causal Mean-Flow & Dual-Branch Demo**
   - Causal chunking (4-frame chunk = 1 latent frame) + short sliding-window KV cache
   - 1–2 step Mean-Flow / sCM + Self-Forcing distillation (`Causal-rCM`) + `TAEHV` decoder

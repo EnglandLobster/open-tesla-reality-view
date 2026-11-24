@@ -1,4 +1,9 @@
-"""Wan2.1-VACE-1.3B Reality View generator wrapper and Flow-Matching training objective."""
+"""Wan2.1-VACE-1.3B Reality View generator wrapper and Flow-Matching training objective.
+
+Matches ``diffusers.WanVACETransformer3DModel`` and ``diffusers.AutoencoderKLWan`` exact
+tensor conventions (channel-wise ``latents_mean`` / ``latents_std`` normalization,
+64-channel nearest-exact VACE masks, and 1D per-layer ``control_hidden_states_scale``).
+"""
 
 from __future__ import annotations
 
@@ -11,16 +16,50 @@ from torch import nn
 from open_reality_view.models.context_adapter import AlpamayoContextAdapter
 
 
+def _wan_latent_stats(
+    vae: Any,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(latents_mean, inv_latents_std)`` shaped ``[1, z_dim, 1, 1, 1]`` in float32."""
+    z_dim = vae.config.z_dim
+    mean = torch.tensor(vae.config.latents_mean, device=device, dtype=torch.float32).view(
+        1, z_dim, 1, 1, 1
+    )
+    inv_std = 1.0 / torch.tensor(vae.config.latents_std, device=device, dtype=torch.float32).view(
+        1, z_dim, 1, 1, 1
+    )
+    return mean, inv_std
+
+
+@torch.no_grad()
+def encode_wan_latents(vae: Any, video: torch.Tensor) -> torch.Tensor:
+    """Encode RGB video ``[B, 3, T, H, W]`` in ``[-1, 1]`` into normalized Wan latents ``[B, 16, F, h, w]``."""
+    vae_dtype = next(vae.parameters()).dtype
+    latents = vae.encode(video.to(dtype=vae_dtype)).latent_dist.mode()
+    mean, inv_std = _wan_latent_stats(vae, latents.device)
+    return ((latents.float() - mean) * inv_std).to(dtype=vae_dtype)
+
+
+@torch.no_grad()
+def decode_wan_latents(vae: Any, latents: torch.Tensor) -> torch.Tensor:
+    """Decode normalized Wan latents ``[B, 16, F, h, w]`` back into RGB video ``[B, 3, T, H, W]`` in ``[-1, 1]``."""
+    vae_dtype = next(vae.parameters()).dtype
+    mean, inv_std = _wan_latent_stats(vae, latents.device)
+    unnorm = (latents.float() / inv_std + mean).to(dtype=vae_dtype)
+    return vae.decode(unnorm).sample
+
+
 def pack_vace_mask(
     hole_mask: torch.Tensor,
     *,
     spatial_stride: int = 8,
     temporal_stride: int = 4,
 ) -> torch.Tensor:
-    """Pack pixel-space binary/soft mask into Wan2.1-VACE's 64-channel latent mask layout.
+    """Pack pixel-space hole mask into Wan2.1-VACE's exact 64-channel latent mask layout.
 
-    Wan2.1 causal 3D VAE maps ``T = 1 + 4 * k`` pixel frames to ``F_lat = 1 + k`` latent frames
-    and downsamples spatial dimensions by ``8x8`` (pixel-unshuffled into ``64`` channels).
+    Matches ``diffusers.WanVACEPipeline.prepare_masks`` bit-for-bit:
+      - Pixel-unshuffle spatial ``8x8`` into ``64`` channels (``permute(2, 4, 0, 1, 3)``),
+      - Temporal nearest-exact interpolation from ``T = 1 + 4*k`` frames to ``F_lat = 1 + k``.
 
     Args:
         hole_mask: ``[B, 1, T, H, W]`` where ``1.0`` denotes regions to generate/inpaint.
@@ -42,29 +81,23 @@ def pack_vace_mask(
             f"Wan causal 3D-VAE requires T = 1 + {temporal_stride}*k frames, got T={num_frames}."
         )
 
-    # First frame is its own latent chunk; remaining frames group in blocks of temporal_stride.
-    first = hole_mask[:, :, :1]  # [B, 1, 1, H, W]
-    if num_frames > 1:
-        rest = hole_mask[:, :, 1:].reshape(
-            bsz, 1, (num_frames - 1) // temporal_stride, temporal_stride, height, width
-        )
-        rest = rest.mean(dim=3)  # [B, 1, k, H, W]
-        temporal_down = torch.cat([first, rest], dim=2)  # [B, 1, F_lat, H, W]
-    else:
-        temporal_down = first
-
-    f_lat = temporal_down.shape[2]
+    f_lat = (num_frames + temporal_stride - 1) // temporal_stride
     h_lat = height // spatial_stride
     w_lat = width // spatial_stride
 
-    # Spatial pixel-unshuffle: [B, 1, F_lat, H_lat, s, W_lat, s] -> [B, s*s, F_lat, H_lat, W_lat]
-    unshuffled = temporal_down.reshape(
-        bsz, 1, f_lat, h_lat, spatial_stride, w_lat, spatial_stride
+    # [B, T, H_lat, s, W_lat, s] -> [B, s*s, T, H_lat, W_lat]
+    unshuffled = hole_mask[:, 0].reshape(
+        bsz, num_frames, h_lat, spatial_stride, w_lat, spatial_stride
     )
-    unshuffled = unshuffled.permute(0, 1, 4, 6, 2, 3, 5).reshape(
-        bsz, spatial_stride * spatial_stride, f_lat, h_lat, w_lat
+    unshuffled = unshuffled.permute(0, 3, 5, 1, 2, 4).reshape(
+        bsz, spatial_stride * spatial_stride, num_frames, h_lat, w_lat
     )
-    return unshuffled.contiguous()
+    packed = F.interpolate(
+        unshuffled.float(),
+        size=(f_lat, h_lat, w_lat),
+        mode="nearest-exact",
+    )
+    return packed.to(dtype=hole_mask.dtype).contiguous()
 
 
 def pack_vace_control_tensor(
@@ -81,6 +114,30 @@ def pack_vace_control_tensor(
     return torch.cat([inactive_latents, reactive_latents, packed_mask], dim=1)
 
 
+@torch.no_grad()
+def encode_vace_control(
+    vae: Any,
+    coarse_video: torch.Tensor,
+    hole_mask: torch.Tensor,
+    *,
+    spatial_stride: int = 8,
+    temporal_stride: int = 4,
+) -> torch.Tensor:
+    """Encode pixel-space ``coarse_video`` (``[-1, 1]``) + ``hole_mask`` (``{0, 1}``) into 96-ch VACE control."""
+    binary_mask = (hole_mask > 0.5).to(dtype=coarse_video.dtype)
+    inactive_video = coarse_video * (1.0 - binary_mask)
+    reactive_video = coarse_video * binary_mask
+
+    inactive_lat = encode_wan_latents(vae, inactive_video)
+    reactive_lat = encode_wan_latents(vae, reactive_video)
+    packed_mask = pack_vace_mask(
+        binary_mask,
+        spatial_stride=spatial_stride,
+        temporal_stride=temporal_stride,
+    ).to(dtype=inactive_lat.dtype)
+    return pack_vace_control_tensor(inactive_lat, reactive_lat, packed_mask)
+
+
 class RealityViewVACEModel(nn.Module):
     """End-to-end trainable Reality View model: ``AlpamayoContextAdapter`` + ``Wan2.1-VACE-1.3B``."""
 
@@ -91,12 +148,18 @@ class RealityViewVACEModel(nn.Module):
         *,
         flow_shift: float = 3.0,
         vace_context_scale: float = 1.0,
+        num_vace_layers: int = 15,
     ) -> None:
         super().__init__()
         self.transformer = transformer
         self.context_adapter = context_adapter
         self.flow_shift = flow_shift
         self.vace_context_scale = vace_context_scale
+
+        # Automatically detect vace_layers count from Diffusers transformer config if available.
+        cfg = getattr(transformer, "config", None)
+        vace_layers = getattr(cfg, "vace_layers", None)
+        self.num_vace_layers = len(vace_layers) if vace_layers is not None else num_vace_layers
 
     @classmethod
     def from_pretrained(
@@ -108,14 +171,16 @@ class RealityViewVACEModel(nn.Module):
         flow_shift: float = 3.0,
         vace_context_scale: float = 1.0,
         gradient_checkpointing: bool = True,
+        cache_dir: str | None = None,
     ) -> RealityViewVACEModel:
-        """Load ``WanVACETransformer3DModel`` without the UMT5-XXL text encoder."""
+        """Load ``WanVACETransformer3DModel`` without the 11 GB UMT5-XXL text encoder."""
         from diffusers import WanVACETransformer3DModel
 
         transformer = WanVACETransformer3DModel.from_pretrained(
             model_id,
             subfolder="transformer",
             torch_dtype=dtype,
+            cache_dir=cache_dir,
         )
         if gradient_checkpointing and hasattr(transformer, "enable_gradient_checkpointing"):
             transformer.enable_gradient_checkpointing()
@@ -163,6 +228,15 @@ class RealityViewVACEModel(nn.Module):
             u = (self.flow_shift * u) / (1.0 + (self.flow_shift - 1.0) * u)
         return u.clamp(1e-4, 1.0 - 1e-4)
 
+    def _build_control_scale(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Return 1D per-VACE-layer scale tensor required by ``WanVACETransformer3DModel``."""
+        return torch.full(
+            (self.num_vace_layers,),
+            fill_value=self.vace_context_scale,
+            device=device,
+            dtype=dtype,
+        )
+
     def forward(
         self,
         noisy_latents: torch.Tensor,
@@ -171,20 +245,24 @@ class RealityViewVACEModel(nn.Module):
         vision_tokens: torch.Tensor,
         plucker_rays: torch.Tensor | None = None,
         camera_ids: torch.Tensor | None = None,
+        encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict Flow-Matching velocity ``v_theta(x_t, t, c)``."""
-        encoder_hidden_states = self.context_adapter(
-            vision_tokens=vision_tokens,
-            plucker_rays=plucker_rays,
-            camera_ids=camera_ids,
-        ).to(dtype=noisy_latents.dtype)
+        if encoder_hidden_states is None:
+            encoder_hidden_states = self.context_adapter(
+                vision_tokens=vision_tokens,
+                plucker_rays=plucker_rays,
+                camera_ids=camera_ids,
+            )
+        encoder_hidden_states = encoder_hidden_states.to(dtype=noisy_latents.dtype)
+        control_scale = self._build_control_scale(noisy_latents.device, noisy_latents.dtype)
 
         out: Any = self.transformer(
             hidden_states=noisy_latents,
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
-            control_hidden_states=vace_context,
-            control_hidden_states_scale=self.vace_context_scale,
+            control_hidden_states=vace_context.to(dtype=noisy_latents.dtype),
+            control_hidden_states_scale=control_scale,
             return_dict=True,
         )
         return out.sample if hasattr(out, "sample") else out[0]
