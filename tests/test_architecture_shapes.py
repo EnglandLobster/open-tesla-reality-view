@@ -357,6 +357,86 @@ def test_trajectory_ribbon_renders_ahead_and_respects_depth_occlusion() -> None:
     assert torch.allclose(occluded, bg, atol=1e-5)
 
 
+def test_3dgs_large_gaussian_has_no_tile_boundary_seam() -> None:
+    """Large >120px Gaussians must fade smoothly across 16x16 tile boundaries without hard clipping seams."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    means = torch.tensor([[0.0, 0.0, 5.0]], device=device)
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device)
+    scales = torch.tensor([[1.5, 1.5, 0.2]], device=device)  # ~180px radius at fx=256, z=5
+    opacities = torch.tensor([0.9], device=device)
+    sh_dc = torch.tensor([[1.77, 1.77, 1.77]], device=device)
+    c2w = torch.eye(4, device=device)
+    k = torch.tensor([[256.0, 0.0, 128.0], [0.0, 256.0, 128.0], [0.0, 0.0, 1.0]], device=device)
+
+    out = render_gaussians_triton(
+        means=means,
+        quats_wxyz=quats,
+        scales=scales,
+        opacities=opacities,
+        sh_dc=sh_dc,
+        sh_rest=None,
+        c2w=c2w,
+        intrinsics=k,
+        height=256,
+        width=256,
+    )
+    row = out.rgb[128, :, 0]
+    max_step = (row[1:] - row[:-1]).abs().max().item()
+    assert row[128].item() > 0.8
+    assert max_step < 0.03
+
+
+def test_3dgs_underground_pancake_does_not_pop_in_front_of_road() -> None:
+    """Large grazing/underground pancakes must sort by per-tile 3D ray hit depth, not center Z."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # OpenCV camera frame (+X right, +Y down, +Z forward):
+    # - Small dark road splat on the road plane y=2.0m at z=16.0m (projects near center-bottom ray)
+    # - Giant bright white horizontal pancake 1.5m *underneath* the road (y=3.5m, scales=[4.5, 0.01, 4.5])
+    #   with center slightly closer in Z (z=15.5m) so naive center-Z sorting would wrongly draw it IN FRONT of the road!
+    means = torch.tensor(
+        [
+            [0.0, 2.0, 16.0],  # dark road splat directly on the ray
+            [0.0, 3.5, 15.5],  # bright underground pancake 1.5m below road
+        ],
+        device=device,
+    )
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device)
+    scales = torch.tensor(
+        [
+            [0.5, 0.1, 0.5],
+            [4.5, 0.01, 4.5],
+        ],
+        device=device,
+    )
+    opacities = torch.tensor([0.98, 0.90], device=device)
+    sh_dc = torch.tensor(
+        [
+            [-1.77, -1.77, -1.77],  # black road (RGB=0)
+            [1.77, 1.77, 1.77],     # bright white underground pancake (RGB=1)
+        ],
+        device=device,
+    )
+    c2w = torch.eye(4, device=device)
+    k = torch.tensor([[400.0, 0.0, 128.0], [0.0, 400.0, 128.0], [0.0, 0.0, 1.0]], device=device)
+
+    out = render_gaussians_triton(
+        means=means,
+        quats_wxyz=quats,
+        scales=scales,
+        opacities=opacities,
+        sh_dc=sh_dc,
+        sh_rest=None,
+        c2w=c2w,
+        intrinsics=k,
+        height=256,
+        width=256,
+    )
+    # Road splat projects to u=128, v=128 + 400*(2/16) = 178
+    assert out.alpha[178, 128].item() > 0.9
+    # Because the ray hits the road at z=16m and the underground plane at z=28m, the road MUST stay dark!
+    assert out.rgb[178, 128, 0].item() < 0.1
+
+
 def test_glb_ego_mesh_loader_aligns_and_grounds_when_present() -> None:
     glb = Path(__file__).resolve().parents[1] / "assets/ego_car_concept.glb"
     if not glb.is_file():

@@ -404,10 +404,10 @@ def render_gaussians_triton(
     near_plane: float = 0.25,
     far_plane: float = 400.0,
     opacity_threshold: float = 0.01,
-    max_radius_px: int = 96,
+    max_radius_px: int | None = None,
     tile_size: int = 16,
 ) -> GaussianRenderOutput:
-    """Render 3D Gaussians into a pinhole camera using pure PyTorch projection + Triton rasterization."""
+    """Render 3D Gaussians into a pinhole camera using pure PyTorch projection + Triton/PyTorch tile rasterization."""
     device = means.device
     c2w = c2w.to(device=device, dtype=torch.float32)
     w2c = torch.linalg.inv(c2w)
@@ -416,7 +416,7 @@ def render_gaussians_triton(
     rot_w2c = w2c[:3, :3]
     t_w2c = w2c[:3, 3]
 
-    # 1. Transform centers to camera frame & frustum cull
+    # 1. Transform centers to camera frame & loose frustum cull (exact screen-box cull happens after computing rx, ry)
     means_cam = means @ rot_w2c.T + t_w2c[None, :]
     z = means_cam[:, 2]
     fx, fy = k[0, 0], k[1, 1]
@@ -425,15 +425,15 @@ def render_gaussians_triton(
     u = fx * (means_cam[:, 0] / z.clamp_min(1e-4)) + cx
     v = fy * (means_cam[:, 1] / z.clamp_min(1e-4)) + cy
 
-    margin = float(max_radius_px)
+    loose_margin = float(max(width, height))
     vis = (
         (z > near_plane)
         & (z < far_plane)
         & (opacities > opacity_threshold)
-        & (u > -margin)
-        & (u < width + margin)
-        & (v > -margin)
-        & (v < height + margin)
+        & (u > -loose_margin)
+        & (u < width + loose_margin)
+        & (v > -loose_margin)
+        & (v < height + loose_margin)
     )
 
     if not vis.any():
@@ -459,8 +459,8 @@ def render_gaussians_triton(
 
     # 2. EWA 2D covariance projection: cov2d = (J W R S)(J W R S)^T + 0.3 I
     rot_g = quat_wxyz_to_rotmat(quats_v)  # [M, 3, 3]
-    m_mat = rot_g * scales_v[:, None, :]  # R @ diag(s)
-    wm = torch.matmul(rot_w2c[None], m_mat)  # [M, 3, 3]
+    wr = torch.matmul(rot_w2c[None], rot_g)  # [M, 3, 3] W @ R in camera frame
+    wm = wr * scales_v[:, None, :]  # W @ R @ diag(s)
 
     # Clamp x/z, y/z inside 1.3x frustum to stabilize peripheral EWA Jacobian
     lim_x = 1.3 * (width / (2.0 * fx))
@@ -478,64 +478,72 @@ def render_gaussians_triton(
     cov11 = (t1 * t1).sum(dim=-1) + 0.3
     det = cov00 * cov11 - cov01 * cov01
 
-    good = det > 1e-6
+    # Exact opacity-aware tight axis-aligned 2D ellipse extents (zero 16x16 tile-boundary clipping!)
+    # Contribution drops strictly below 1/255 at r = sqrt(2 * ln(255 * opacity)) <= 3.33 sigma.
+    extend = torch.sqrt((2.0 * torch.log((opac_v * 255.0).clamp_min(1.0))).clamp_min(0.0))
+    rx = torch.ceil(extend * cov00.clamp_min(1e-6).sqrt())
+    ry = torch.ceil(extend * cov11.clamp_min(1e-6).sqrt())
+
+    # Cull degenerate or absurdly oversized broken floaters cleanly instead of clipping mid-tile
+    cap_px = float(max_radius_px) if max_radius_px is not None else float(max(width, height) * 2)
+    in_screen = (u_v + rx >= 0.0) & (u_v - rx < float(width)) & (v_v + ry >= 0.0) & (v_v - ry < float(height))
+    good = (det > 1e-6) & in_screen & (rx <= cap_px) & (ry <= cap_px)
     if not good.any():
+        rgb = torch.zeros((height, width, 3), device=device)
+        if skybox_textures is not None:
+            rgb = sample_cubemap_skybox(skybox_textures, c2w, k, height, width)
         return GaussianRenderOutput(
-            rgb=torch.zeros((height, width, 3), device=device),
+            rgb=rgb,
             depth=torch.zeros((height, width), device=device),
             alpha=torch.zeros((height, width), device=device),
         )
 
     means_v = means_v[good]
+    means_cam_v = means_cam_v[good]
     z_v = z_v[good]
     u_v = u_v[good]
     v_v = v_v[good]
     opac_v = opac_v[good]
+    scales_v = scales_v[good]
+    wr = wr[good]
     sh_dc_v = sh_dc_v[good]
     sh_rest_v = sh_rest_v[good] if sh_rest_v is not None else None
     cov00, cov01, cov11, det = cov00[good], cov01[good], cov11[good], det[good]
+    rx_f = rx[good].clamp(min=1.0)
+    ry_f = ry[good].clamp(min=1.0)
+    rx = rx_f.to(torch.int32)
+    ry = ry_f.to(torch.int32)
 
     inv_det = 1.0 / det
     conic = torch.stack([cov11 * inv_det, -cov01 * inv_det, cov00 * inv_det], dim=-1)  # [M, 3]
-
-    mid = 0.5 * (cov00 + cov11)
-    disc = (mid * mid - det).clamp_min(0.1).sqrt()
-    lam_max = mid + disc
-    radii = torch.ceil(3.0 * lam_max.sqrt()).clamp(min=1.0, max=float(max_radius_px)).to(torch.int32)
 
     # 3. Evaluate SH degree 3 colors
     cam_pos = c2w[:3, 3]
     view_dirs = F.normalize(means_v - cam_pos[None, :], dim=-1)
     colors = evaluate_sh_degree3(sh_dc_v, sh_rest_v, view_dirs).contiguous()
 
-    # 4. Tile binning & depth-major radix sort per tile
+    # 4. Tight axis-aligned tile binning & depth-major radix sort per tile
     num_tiles_x = (width + tile_size - 1) // tile_size
     num_tiles_y = (height + tile_size - 1) // tile_size
     num_tiles = num_tiles_x * num_tiles_y
 
-    tx0 = torch.floor((u_v - radii) / tile_size).clamp(0, num_tiles_x - 1).to(torch.int32)
-    tx1 = torch.floor((u_v + radii) / tile_size).clamp(0, num_tiles_x - 1).to(torch.int32)
-    ty0 = torch.floor((v_v - radii) / tile_size).clamp(0, num_tiles_y - 1).to(torch.int32)
-    ty1 = torch.floor((v_v + radii) / tile_size).clamp(0, num_tiles_y - 1).to(torch.int32)
-
-    # Cull Gaussians whose bounding box is completely outside image bounds
-    in_img = (u_v + radii >= 0) & (u_v - radii < width) & (v_v + radii >= 0) & (v_v - radii < height)
-    if not in_img.any():
-        return GaussianRenderOutput(
-            rgb=torch.zeros((height, width, 3), device=device),
-            depth=torch.zeros((height, width), device=device),
-            alpha=torch.zeros((height, width), device=device),
-        )
+    tx0 = torch.floor((u_v - rx) / tile_size).clamp(0, num_tiles_x - 1).to(torch.int32)
+    tx1 = torch.floor((u_v + rx) / tile_size).clamp(0, num_tiles_x - 1).to(torch.int32)
+    ty0 = torch.floor((v_v - ry) / tile_size).clamp(0, num_tiles_y - 1).to(torch.int32)
+    ty1 = torch.floor((v_v + ry) / tile_size).clamp(0, num_tiles_y - 1).to(torch.int32)
 
     means2d = torch.stack([u_v, v_v], dim=-1).contiguous()
     nx = (tx1 - tx0 + 1).clamp_min(0)
     ny = (ty1 - ty0 + 1).clamp_min(0)
-    tiles_per_g = torch.where(in_img, nx * ny, torch.zeros_like(nx))
+    tiles_per_g = nx * ny
 
     total_isects = int(tiles_per_g.sum().item())
     if total_isects == 0:
+        rgb = torch.zeros((height, width, 3), device=device)
+        if skybox_textures is not None:
+            rgb = sample_cubemap_skybox(skybox_textures, c2w, k, height, width)
         return GaussianRenderOutput(
-            rgb=torch.zeros((height, width, 3), device=device),
+            rgb=rgb,
             depth=torch.zeros((height, width), device=device),
             alpha=torch.zeros((height, width), device=device),
         )
@@ -554,8 +562,56 @@ def render_gaussians_triton(
     tile_x = tx0[g_indices].to(torch.int64) + (local_idx % nx_g)
     tile_ids = tile_y * num_tiles_x + tile_x
 
+    # Hybrid radial + per-tile 3D ray-Gaussian depth (StopThePop / 3DGUT):
+    # - Normal/small Gaussians sort by radial camera distance ||means_cam|| (matching 3DGUT with zero tile-flip seams).
+    # - Large extended Gaussians (e.g. >0.65m flat background/underground pancakes spanning >32px) sort by their
+    #   exact per-tile 3D ray-Gaussian max-response distance t_hit so underground/grazing splats never pop in front
+    #   of the closer road surface along a sharp depth-contour line.
+    r_v = means_cam_v.norm(dim=-1)
+    sort_depth = r_v[g_indices].clone()
+    is_large_g = (scales_v.max(dim=-1).values > 0.65) & (torch.maximum(rx_f, ry_f) > 32.0)
+    large_isect = is_large_g[g_indices]
+    if large_isect.any():
+        large_idx = torch.nonzero(is_large_g, as_tuple=False).squeeze(-1)
+        inv_map = torch.full((means2d.shape[0],), -1, device=device, dtype=torch.long)
+        inv_map[large_idx] = torch.arange(large_idx.shape[0], device=device, dtype=torch.long)
+
+        inv_s = 1.0 / scales_v[large_idx].clamp_min(1e-4)
+        a_large = wr[large_idx].transpose(1, 2) * inv_s[:, :, None]  # [G, 3, 3]
+        m_large = torch.bmm(a_large, means_cam_v[large_idx].unsqueeze(-1)).squeeze(-1)  # [G, 3]
+
+        lg = inv_map[g_indices[large_isect].to(torch.long)]
+        dx_ray = ((tile_x[large_isect].float() + 0.5) * tile_size - cx) / fx
+        dy_ray = ((tile_y[large_isect].float() + 0.5) * tile_size - cy) / fy
+        d_unit = F.normalize(torch.stack([dx_ray, dy_ray, torch.ones_like(dx_ray)], dim=-1), dim=-1)
+
+        num_large_isects = lg.shape[0]
+        t_hit_all = torch.empty(num_large_isects, device=device, dtype=torch.float32)
+        chunk_k = 500_000
+        for s0 in range(0, num_large_isects, chunk_k):
+            s1 = min(s0 + chunk_k, num_large_isects)
+            lg_c = lg[s0:s1]
+            u_g = torch.bmm(a_large[lg_c], d_unit[s0:s1].unsqueeze(-1)).squeeze(-1)
+            m_g = m_large[lg_c]
+            t_hit_all[s0:s1] = (u_g * m_g).sum(dim=-1) / (u_g * u_g).sum(dim=-1).clamp_min(1e-8)
+
+        sort_depth[large_isect] = t_hit_all
+        valid_isect = (sort_depth > near_plane) & (sort_depth < far_plane * 2.0)
+        g_indices = g_indices[valid_isect]
+        tile_ids = tile_ids[valid_isect]
+        sort_depth = sort_depth[valid_isect]
+        if g_indices.numel() == 0:
+            rgb = torch.zeros((height, width, 3), device=device)
+            if skybox_textures is not None:
+                rgb = sample_cubemap_skybox(skybox_textures, c2w, k, height, width)
+            return GaussianRenderOutput(
+                rgb=rgb,
+                depth=torch.zeros((height, width), device=device),
+                alpha=torch.zeros((height, width), device=device),
+            )
+
     # Pack (tile_id << 32) | depth_bits (positive float32 preserves order as int32)
-    depth_u32 = z_v[g_indices].contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    depth_u32 = sort_depth.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
     sort_keys = (tile_ids << 32) | depth_u32
     _, perm = torch.sort(sort_keys)
     sorted_gids = g_indices[perm].contiguous()
