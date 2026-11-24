@@ -27,6 +27,7 @@ from open_reality_view.encoders import Alpamayo2EdgeVisionEncoder
 from open_reality_view.geometry import (
     EgoVehicleCompositor,
     MultiViewDepthProjector,
+    Temporal3DCacheProjector,
     compute_plucker_rays,
 )
 from open_reality_view.models import encode_vace_control, encode_wan_latents
@@ -63,16 +64,35 @@ def precache_clip(
     gt_video_m11 = clip.chase_gt_rgb.permute(1, 0, 2, 3).unsqueeze(0).to(device) * 2.0 - 1.0
 
     coarse_frames, mask_frames = [], []
+    use_temporal_cache = (
+        isinstance(projector, Temporal3DCacheProjector) and clip.rig_to_world is not None
+    )
+    rig_to_world = clip.rig_to_world.unsqueeze(0).to(device) if clip.rig_to_world is not None else None
+    cache_window = 6
+
     for f_idx in range(num_frames):
-        proj = projector(
-            surround_rgb[:, f_idx],
-            surround_depth[:, f_idx],
-            src_k[:, f_idx],
-            src_c2e[:, f_idx],
-            tgt_k[:, f_idx],
-            tgt_c2e[:, f_idx],
-            target_hw=(h_tgt, w_tgt),
-        )
+        if use_temporal_cache and rig_to_world is not None:
+            w_start = max(0, f_idx - cache_window + 1)
+            proj = projector.project_temporal_window(
+                surround_rgb[:, w_start : f_idx + 1],
+                surround_depth[:, w_start : f_idx + 1],
+                src_k[:, w_start : f_idx + 1],
+                src_c2e[:, w_start : f_idx + 1],
+                rig_to_world[:, w_start : f_idx + 1],
+                tgt_k[:, f_idx],
+                tgt_c2e[:, f_idx],
+                target_hw=(h_tgt, w_tgt),
+            )
+        else:
+            proj = projector(
+                surround_rgb[:, f_idx],
+                surround_depth[:, f_idx],
+                src_k[:, f_idx],
+                src_c2e[:, f_idx],
+                tgt_k[:, f_idx],
+                tgt_c2e[:, f_idx],
+                target_hw=(h_tgt, w_tgt),
+            )
         proj = ego_comp(proj, tgt_k[:, f_idx], tgt_c2e[:, f_idx])
         coarse_frames.append(proj.coarse_rgb)
         mask_frames.append(proj.hole_mask)
@@ -150,12 +170,16 @@ def main() -> None:
     vae.requires_grad_(False)
     vae.eval()
 
-    projector = MultiViewDepthProjector(
+    projector: MultiViewDepthProjector = Temporal3DCacheProjector(
         min_depth_m=cfg.geometry.min_depth_m,
         max_depth_m=cfg.geometry.max_depth_m,
         splat_radius_px=cfg.geometry.splat_radius_px,
     ).to(device)
-    ego_comp = EgoVehicleCompositor(ego_box_lwh=tuple(cfg.data.ego_box_lwh)).to(device)
+    ego_glb = Path("assets/ego_car_concept.glb")
+    ego_comp = EgoVehicleCompositor(
+        ego_box_lwh=tuple(cfg.data.ego_box_lwh),
+        glb_path=ego_glb if ego_glb.is_file() else None,
+    ).to(device)
 
     clips: list[DrivingClip] = []
     if args.synthetic_demo > 0:

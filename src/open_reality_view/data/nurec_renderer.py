@@ -15,11 +15,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from open_reality_view.geometry.ego_car import EgoVehicleCompositor
+from open_reality_view.geometry.ego_car import DEFAULT_EGO_GLB_RELATIVE, EgoVehicleCompositor
 from open_reality_view.geometry.projector import (
     ProjectionResult,
     build_chase_camera_pose,
     build_orbit_chase_pose,
+)
+from open_reality_view.geometry.trajectory_overlay import (
+    composite_trajectory_ribbon,
+    extract_future_waypoints_ego,
 )
 from open_reality_view.rendering.triton_3dgs import (
     GaussianRenderOutput,
@@ -151,7 +155,14 @@ class NuRecSceneRenderer:
         "camera_rear_right_70fov",
     )
 
-    def __init__(self, usdz_path: str | Path, device: str | torch.device = "cuda") -> None:
+    def __init__(
+        self,
+        usdz_path: str | Path,
+        device: str | torch.device = "cuda",
+        *,
+        ego_glb_path: str | Path | None = "auto",
+        ego_paint_theme: str = "pearl_white",
+    ) -> None:
         self.usdz_path = Path(usdz_path)
         self.device = torch.device(device)
 
@@ -246,19 +257,45 @@ class NuRecSceneRenderer:
                     np.asarray(poses, dtype=np.float32),
                 )
 
+        # Resolve optional PBR .glb ego vehicle asset
+        resolved_glb: Path | None = None
+        if ego_glb_path == "auto":
+            candidates = [
+                Path.cwd() / DEFAULT_EGO_GLB_RELATIVE,
+                Path(__file__).resolve().parents[3] / DEFAULT_EGO_GLB_RELATIVE,
+            ]
+            for cand in candidates:
+                if cand.is_file():
+                    resolved_glb = cand
+                    break
+        elif ego_glb_path is not None:
+            resolved_glb = Path(ego_glb_path)
+
         # Ego vehicle compositor shifted to match NuRec rear-axle rig_bbox centroid!
         self.ego_compositor = EgoVehicleCompositor(
             ego_box_lwh=self.ego_dim_lwh,
             points_per_meter=24,
             splat_radius_px=1,
+            glb_path=resolved_glb,
+            paint_theme=ego_paint_theme,
         ).to(self.device)
-        # Align procedural ego center (0, 0, H/2) to NuRec rig_bbox centroid (e.g., x=+1.31m ahead of rear axle)
-        shift = torch.tensor(
-            [self.ego_centroid[0], self.ego_centroid[1], 0.0],
-            device=self.device,
-            dtype=torch.float32,
-        )
-        self.ego_compositor.ego_points = self.ego_compositor.ego_points + shift[None, :]
+        self.ego_compositor.set_ego_shift((self.ego_centroid[0], self.ego_centroid[1], 0.0))
+
+    def future_ego_waypoints(
+        self,
+        timestamp_us: float,
+        *,
+        horizon_sec: float = 4.5,
+        num_points: int = 36,
+    ) -> torch.Tensor:
+        """Extract real future ego path waypoints ``[num_points, 3]`` in the current ego rig frame."""
+        return extract_future_waypoints_ego(
+            self.rig_ts_us,
+            self.T_rig_worlds,
+            timestamp_us,
+            horizon_sec=horizon_sec,
+            num_points=num_points,
+        ).to(self.device)
 
     def rig_to_nurec(self, timestamp_us: float) -> torch.Tensor:
         T_rw = _interp_se3(self.rig_ts_us, self.T_rig_worlds, timestamp_us)
@@ -359,6 +396,7 @@ class NuRecSceneRenderer:
         width: int,
         *,
         composite_ego: bool = False,
+        draw_trajectory: bool = False,
         _cached_gaussians: tuple[torch.Tensor, ...] | None = None,
     ) -> GaussianRenderOutput:
         """Render any rig-relative camera (surround OR third-person chase/orbit) at ``timestamp_us``."""
@@ -395,11 +433,24 @@ class NuRecSceneRenderer:
                 skybox_textures=self.skybox,
                 T_rig_world=T_rig_nurec,
             )
-            return GaussianRenderOutput(
+            out = GaussianRenderOutput(
                 rgb=comp.coarse_rgb[0].permute(1, 2, 0),
                 depth=comp.target_depth[0, 0],
                 alpha=(comp.hole_mask[0, 0] < 0.5).float(),
             )
+
+        if draw_trajectory:
+            waypoints = self.future_ego_waypoints(timestamp_us)
+            ribbon_rgb = composite_trajectory_ribbon(
+                out.rgb,
+                out.depth,
+                intrinsics,
+                T_cam_rig.to(device=self.device, dtype=torch.float32),
+                waypoints,
+                start_x_m=self.ego_centroid[0] + self.ego_dim_lwh[0] * 0.5 + 0.35,
+                phase_sec=timestamp_us * 1e-6,
+            )
+            out = GaussianRenderOutput(rgb=ribbon_rgb, depth=out.depth, alpha=out.alpha)
         return out
 
     @torch.no_grad()
@@ -489,4 +540,5 @@ class NuRecSceneRenderer:
             "chase_depth": chase_res.depth,
             "tgt_intrinsics": k_tgt,
             "tgt_c2e": chase_pose_rig,
+            "rig_to_world": self.rig_to_nurec(timestamp_us),
         }

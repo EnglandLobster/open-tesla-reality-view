@@ -32,6 +32,7 @@ class DrivingClip:
     chase_gt_rgb: torch.Tensor  # [T, 3, H_tgt, W_tgt] in [0, 1]
     tgt_intrinsics: torch.Tensor  # [T, 3, 3]
     tgt_c2e: torch.Tensor  # [T, 4, 4]
+    rig_to_world: torch.Tensor | None = None  # [T, 4, 4] optional ego odometry for Temporal3DCache
 
 
 def _load_rgb_tensor(path: Path, size_hw: tuple[int, int] | None = None) -> torch.Tensor:
@@ -100,6 +101,11 @@ class ClipDirectoryDataset(Dataset[DrivingClip]):
             if has_depths:
                 depth_frames.append(torch.stack(cam_depths, dim=0))
 
+        rig_to_world = (
+            torch.tensor(meta["rig_to_world"][:t_len], dtype=torch.float32)
+            if "rig_to_world" in meta
+            else None
+        )
         return DrivingClip(
             clip_id=clip_dir.name,
             surround_rgb=torch.stack(surround_frames, dim=0),
@@ -109,6 +115,7 @@ class ClipDirectoryDataset(Dataset[DrivingClip]):
             chase_gt_rgb=chase_gt,
             tgt_intrinsics=torch.tensor(meta["tgt_intrinsics"][:t_len], dtype=torch.float32),
             tgt_c2e=torch.tensor(meta["tgt_c2e"][:t_len], dtype=torch.float32),
+            rig_to_world=rig_to_world,
         )
 
 

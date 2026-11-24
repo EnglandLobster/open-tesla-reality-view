@@ -21,9 +21,12 @@ from open_reality_view.geometry import (
     EgoVehicleCompositor,
     MultiViewDepthProjector,
     ProjectionResult,
+    Temporal3DCacheProjector,
     build_chase_camera_pose,
     build_orbit_chase_pose,
+    composite_trajectory_ribbon,
     compute_plucker_rays,
+    load_glb_ego_mesh,
 )
 from open_reality_view.models import (
     AlpamayoContextAdapter,
@@ -309,3 +312,57 @@ def test_zero_compiler_3dgs_rasterizer_renders_visible_gaussian_and_depth() -> N
     assert out.rgb[32, 32, 0].item() > 0.85
     assert out.rgb[32, 32, 2].item() < 0.1
     assert out.depth[32, 32].item() == pytest.approx(5.0, abs=0.2)
+
+
+def test_temporal_3d_cache_projector_fuses_past_observations_via_odometry() -> None:
+    h, w = 32, 48
+    k = torch.tensor([[36.0, 0.0, w / 2], [0.0, 36.0, h / 2], [0.0, 0.0, 1.0]])
+    # Single forward camera looking straight ahead (+X_ego)
+    cam_fwd = build_chase_camera_pose(offset_xyz=(2.0, 0.0, 1.4), pitch_deg=-15.0)
+    tgt_pose = build_chase_camera_pose(offset_xyz=(-7.5, 0.0, 4.2), pitch_deg=-18.0)
+
+    # Ego advances +4m along +X between t=0 and t=1 -> ground seen ahead at t=0 is now directly behind ego at t=1!
+    r2w_0 = torch.eye(4)
+    r2w_1 = torch.eye(4)
+    r2w_1[0, 3] = 4.0
+
+    imgs = torch.ones(1, 2, 1, 3, h, w) * 0.5
+    depths = torch.full((1, 2, 1, 1, h, w), 6.0)
+    src_k = k.view(1, 1, 1, 3, 3).repeat(1, 2, 1, 1, 1)
+    src_c2e = cam_fwd.view(1, 1, 1, 4, 4).repeat(1, 2, 1, 1, 1)
+    r2w = torch.stack([r2w_0, r2w_1], dim=0).unsqueeze(0)
+
+    proj = Temporal3DCacheProjector(splat_radius_px=1)
+    res_single = proj(imgs[:, 1], depths[:, 1], src_k[:, 1], src_c2e[:, 1], k[None], tgt_pose[None], (h, w))
+    res_cache = proj.project_temporal_window(imgs, depths, src_k, src_c2e, r2w, k[None], tgt_pose[None], (h, w))
+
+    # Multi-frame 3D cache should strictly reduce blind-spot holes compared to single-frame projection!
+    assert res_cache.hole_mask.mean().item() < res_single.hole_mask.mean().item()
+
+
+def test_trajectory_ribbon_renders_ahead_and_respects_depth_occlusion() -> None:
+    h, w = 64, 96
+    k = torch.tensor([[80.0, 0.0, w / 2], [0.0, 80.0, h / 2], [0.0, 0.0, 1.0]])
+    pose = build_chase_camera_pose(offset_xyz=(-7.5, 0.0, 4.2), pitch_deg=-18.0)
+    bg = torch.full((h, w, 3), 0.2)
+    far_depth = torch.full((h, w), 80.0)
+    waypoints = torch.stack([torch.linspace(0.0, 30.0, 20), torch.zeros(20), torch.zeros(20)], dim=-1)
+
+    rendered = composite_trajectory_ribbon(bg, far_depth, k, pose, waypoints, start_x_m=3.0)
+    # Blue/cyan channel should increase noticeably along the road ahead
+    assert (rendered[..., 2] - bg[..., 2]).max().item() > 0.2
+
+    # When a close obstacle (z=2.0m everywhere) occludes the road, ribbon must stay occluded!
+    occluded = composite_trajectory_ribbon(bg, torch.full((h, w), 2.0), k, pose, waypoints, start_x_m=3.0)
+    assert torch.allclose(occluded, bg, atol=1e-5)
+
+
+def test_glb_ego_mesh_loader_aligns_and_grounds_when_present() -> None:
+    glb = Path(__file__).resolve().parents[1] / "assets/ego_car_concept.glb"
+    if not glb.is_file():
+        pytest.skip("Optional assets/ego_car_concept.glb not downloaded")
+    mesh = load_glb_ego_mesh(glb, ego_box_lwh=(4.72, 1.85, 1.44), paint_theme="pearl_white")
+    assert mesh.num_triangles > 10000
+    assert mesh.vertex_data.shape == (mesh.num_triangles * 3, 12)
+    assert mesh.bbox_min[2] == pytest.approx(0.0, abs=1e-3)
+    assert (mesh.bbox_max[0] - mesh.bbox_min[0]) == pytest.approx(4.72, abs=0.05)

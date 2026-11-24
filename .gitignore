@@ -27,6 +27,7 @@ venv/
 *.bin
 *.onnx
 *.usdz
+*.glb
 *.mp4
 *.avi
 *.mov

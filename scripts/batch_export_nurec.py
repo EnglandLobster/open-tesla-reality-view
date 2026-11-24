@@ -83,6 +83,7 @@ def export_one_clip(
     src_c2e_all: list[list] = []
     tgt_k_all: list[list] = []
     tgt_c2e_all: list[list] = []
+    rig_to_world_all: list[list] = []
 
     for f_idx in range(num_frames):
         ts_us = (start_sec + f_idx / fps) * 1e6
@@ -120,6 +121,7 @@ def export_one_clip(
         src_c2e_all.append(bundle["src_c2e"].cpu().tolist())
         tgt_k_all.append(bundle["tgt_intrinsics"].cpu().tolist())
         tgt_c2e_all.append(bundle["tgt_c2e"].cpu().tolist())
+        rig_to_world_all.append(bundle["rig_to_world"].cpu().tolist())
 
     meta = {
         "clip_id": out_dir.name,
@@ -133,6 +135,7 @@ def export_one_clip(
         "src_c2e": src_c2e_all,
         "tgt_intrinsics": tgt_k_all,
         "tgt_c2e": tgt_c2e_all,
+        "rig_to_world": rig_to_world_all,
     }
     (out_dir / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
 
