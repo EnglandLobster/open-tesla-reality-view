@@ -85,6 +85,12 @@ python scripts/check_env.py
 
 # Run architecture tensor-contract tests
 pytest -v
+
+# Batch-export real NuRec 26.10 scenes with Difix3D+ artifact removal
+python scripts/batch_export_nurec.py --max-scenes 20 --use-difix
+
+# Launch interactive intranet visualizer (live 360° orbit + Difix3D+ toggle)
+python scripts/serve_visualizer.py --host 0.0.0.0 --port 8765
 ```
 
 ## License

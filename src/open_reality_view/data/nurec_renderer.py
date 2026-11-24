@@ -118,18 +118,16 @@ def _interp_track_pose_wxyz(
     return xyz.astype(np.float32), q.astype(np.float32)
 
 
-def _interp_temporal_albedo(albedo: torch.Tensor, t_norm: float) -> torch.Tensor:
-    """Interpolate time-varying albedo ``[N, K_knots, 3]`` at normalized clip time ``t_norm in [0, 1]``."""
+def _extract_base_albedo(albedo: torch.Tensor) -> torch.Tensor:
+    """Extract base SH-DC albedo ``[N, 3]`` from NuRec ``features_albedo`` (``[N, 3]`` or ``[N, K, 3]``).
+
+    In PhysicalAI-AV-NuRec 26.10 checkpoints, ``features_albedo`` stores Fourier temporal basis
+    coefficients where index ``0`` is the constant DC base color and indices ``1..K-1`` are
+    zero-centered temporal harmonics (often frozen at zero for ``dynamic_rigids``).
+    """
     if albedo.ndim == 2:
         return albedo
-    num_knots = albedo.shape[1]
-    if num_knots == 1:
-        return albedo[:, 0, :]
-    pos = max(0.0, min(1.0, t_norm)) * (num_knots - 1)
-    k0 = math.floor(pos)
-    k1 = min(num_knots - 1, k0 + 1)
-    alpha = pos - k0
-    return (1.0 - alpha) * albedo[:, k0, :] + alpha * albedo[:, k1, :]
+    return albedo[:, 0, :]
 
 
 @dataclass
@@ -270,8 +268,6 @@ class NuRecSceneRenderer:
         self,
         timestamp_us: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        t_norm = (timestamp_us - self.t_start_us) / max(1.0, self.t_stop_us - self.t_start_us)
-
         means_list: list[torch.Tensor] = []
         quats_list: list[torch.Tensor] = []
         scales_list: list[torch.Tensor] = []
@@ -284,7 +280,7 @@ class NuRecSceneRenderer:
             quats_list.append(layer["rotations"])
             scales_list.append(layer["scales"])
             opacs_list.append(layer["opacities"])
-            dc_list.append(_interp_temporal_albedo(layer["albedo"], t_norm))
+            dc_list.append(_extract_base_albedo(layer["albedo"]))
             spec_list.append(layer["specular"])
 
         if self.has_dynamic and self.dyn_track_ids:
@@ -327,7 +323,7 @@ class NuRecSceneRenderer:
                 quats_list.append(rot_nurec)
                 scales_list.append(self.dyn_scales[valid_g])
                 opacs_list.append(self.dyn_opacities[valid_g])
-                dc_list.append(_interp_temporal_albedo(self.dyn_albedo[valid_g], t_norm))
+                dc_list.append(_extract_base_albedo(self.dyn_albedo[valid_g]))
                 spec_list.append(self.dyn_specular[valid_g])
 
         return (
@@ -396,6 +392,8 @@ class NuRecSceneRenderer:
                 proj,
                 intrinsics.unsqueeze(0),
                 T_cam_rig.to(device=self.device, dtype=torch.float32).unsqueeze(0),
+                skybox_textures=self.skybox,
+                T_rig_world=T_rig_nurec,
             )
             return GaussianRenderOutput(
                 rgb=comp.coarse_rgb[0].permute(1, 2, 0),

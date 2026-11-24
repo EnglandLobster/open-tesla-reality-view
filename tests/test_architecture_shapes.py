@@ -115,12 +115,27 @@ def test_ego_vehicle_compositor_fills_ego_hole_with_zbuffer() -> None:
         target_depth=torch.zeros(1, 1, h, w),
     )
     compositor = EgoVehicleCompositor(points_per_meter=14, splat_radius_px=1)
-    out = compositor(empty, k_tgt, pose)
+    skybox = torch.full((6, 16, 16, 3), 0.65)
+    out = compositor(empty, k_tgt, pose, skybox_textures=skybox, T_rig_world=torch.eye(4))
 
     observed_pixels = (out.hole_mask == 0.0).sum().item()
     assert observed_pixels > 100
     assert out.coarse_rgb.max().item() > 0.2
     assert out.target_depth[out.hole_mask == 0.0].min().item() > 3.0
+
+
+def test_nurec_base_albedo_extracts_dc_term_without_fourier_washout() -> None:
+    from open_reality_view.data.nurec_renderer import _extract_base_albedo
+
+    albedo_2d = torch.randn(10, 3)
+    assert torch.equal(_extract_base_albedo(albedo_2d), albedo_2d)
+
+    # NuRec 26.10 stores DC base color at col 0 and zero-centered Fourier harmonics at cols 1..K-1
+    albedo_3d = torch.zeros(10, 5, 3)
+    albedo_3d[:, 0, :] = torch.linspace(-1.0, 1.0, 30).reshape(10, 3)
+    extracted = _extract_base_albedo(albedo_3d)
+    assert extracted.shape == (10, 3)
+    assert torch.equal(extracted, albedo_3d[:, 0, :])
 
 
 def test_siglip2_patchify_and_naflex_encoder_contract() -> None:
