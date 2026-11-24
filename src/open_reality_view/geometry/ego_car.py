@@ -384,9 +384,9 @@ void main() {
         env_diff = env_spec * 0.85;
     }
 
-    // Subtle dark asphalt bounce for downward-facing reflections
-    float gnd_mix = smoothstep(-0.05, -0.45, R_ego.z);
-    env_spec = mix(env_spec, vec3(0.14, 0.15, 0.17), gnd_mix * 0.72);
+    // Smooth asphalt bounce for lower / near-horizon body reflections (prevents harsh sky speckles on bumper)
+    float gnd_mix = smoothstep(0.18, -0.22, R_ego.z);
+    env_spec = mix(env_spec, vec3(0.20, 0.21, 0.23), gnd_mix * 0.78);
 
     float fres_k = v_mat.x;
     float rough = clamp(v_mat.y, 0.04, 0.98);

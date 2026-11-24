@@ -20,13 +20,14 @@ def composite_trajectory_ribbon(
     tgt_c2e: torch.Tensor,
     waypoints_ego: torch.Tensor,
     *,
-    ribbon_width_m: float = 1.48,
-    height_offset_m: float = 0.05,
+    ribbon_width_m: float = 1.26,
+    height_offset_m: float = 0.04,
     start_x_m: float = 3.2,
     phase_sec: float = 0.0,
-    max_opacity: float = 0.62,
-    core_color: tuple[float, float, float] = (0.14, 0.72, 1.00),
-    edge_color: tuple[float, float, float] = (0.58, 0.93, 1.00),
+    max_opacity: float = 0.72,
+    show_chevrons: bool = False,
+    core_color: tuple[float, float, float] = (0.06, 0.56, 0.98),
+    edge_color: tuple[float, float, float] = (0.24, 0.76, 1.00),
     chevron_color: tuple[float, float, float] = (0.85, 0.98, 1.00),
 ) -> torch.Tensor:
     """Alpha-blend a depth-tested Tesla-style 3D path ribbon onto ``rgb_hwc [H, W, 3]`` in ``[0, 1]``.
@@ -96,9 +97,9 @@ def composite_trajectory_ribbon(
     if not valid_ground.any():
         return rgb_hwc
 
-    # Strict z-buffer occlusion test against ego car & lead vehicles
+    # Strict z-buffer occlusion test against ego car & lead vehicles (allow gentle road slope tolerance)
     d_scene = depth_hw.to(device=device, dtype=torch.float32)
-    scene_unoccluded = (d_scene <= 0.1) | (t_hit <= d_scene + 0.40)
+    scene_unoccluded = (d_scene <= 0.1) | (t_hit <= d_scene + 0.85)
 
     # Bounding-box prefilter in XY around the polyline
     half_w = ribbon_width_m * 0.5
@@ -145,37 +146,39 @@ def composite_trajectory_ribbon(
     # Normalized lateral position u in [0, 1] (0=center, 1=edge)
     u = (lat_dist / half_w).clamp(0.0, 1.4)
 
-    # Smooth translucent interior + bright glowing outer rail edges (Tesla FSD v15 style)
-    core_profile = torch.clamp(1.0 - torch.pow(u.clamp(max=1.0), 4.0), 0.0, 1.0)
-    edge_glow = torch.exp(-((u - 0.92) / 0.12) ** 2) * 0.95
+    # Tesla FSD v15 style: sleek borderless glowing electric-blue carpet with soft feathered edges
+    smooth_body = torch.clamp(1.0 - torch.pow(u.clamp(max=1.0), 6.0), 0.0, 1.0)
+    center_sheen = torch.exp(-(u / 0.55) ** 2) * 0.28
+    soft_halo = torch.exp(-((u - 0.95).clamp_min(0.0) / 0.16) ** 2) * (u > 0.95).float() * 0.30
 
-    # Forward-pointing animated glowing chevrons (`>>>`) every 3.6 meters
-    chevron_spacing = 3.6
-    # V-shape offset: center leads ahead of edges by 0.65m
-    s_chev = (s_arc - phase_sec * 4.5 + u.clamp(max=1.0) * 0.65) % chevron_spacing
-    chev_band = torch.exp(-((s_chev - 0.35) / 0.18) ** 2) * (1.0 - (u / 0.88).clamp(0.0, 1.0) ** 3)
+    if show_chevrons:
+        chevron_spacing = 4.2
+        s_chev = (s_arc - phase_sec * 4.5 + u.clamp(max=1.0) * 0.55) % chevron_spacing
+        chev_band = torch.exp(-((s_chev - 0.35) / 0.18) ** 2) * (1.0 - (u / 0.88).clamp(0.0, 1.0) ** 3)
+    else:
+        chev_band = torch.zeros_like(u)
 
-    # Smooth longitudinal fade-in past front bumper & fade-out at far horizon
-    fade_near = ((cand_x - start_x_m) / 1.4).clamp(0.0, 1.0)
-    fade_far = (1.0 - ((s_arc - total_len * 0.62) / max(1.0, total_len * 0.38)).clamp(0.0, 1.0)) ** 1.5
-    long_fade = fade_near * fade_far * (1.0 - (u - 1.0).clamp(0.0, 0.25) / 0.25)
+    # Smooth longitudinal fade-in past front bumper & gentle fade-out at far horizon
+    fade_near = ((cand_x - start_x_m) / 1.1).clamp(0.0, 1.0)
+    fade_far = (1.0 - ((s_arc - total_len * 0.58) / max(1.0, total_len * 0.42)).clamp(0.0, 1.0)) ** 1.4
+    long_fade = fade_near * fade_far * (1.0 - (u - 1.02).clamp(0.0, 0.28) / 0.28)
 
-    alpha = (0.36 * core_profile + 0.58 * edge_glow + 0.65 * chev_band).clamp(0.0, 1.0) * max_opacity * long_fade
+    alpha = (0.76 * smooth_body + soft_halo + 0.45 * chev_band).clamp(0.0, 1.0) * max_opacity * long_fade
 
     c_core = torch.tensor(core_color, device=device, dtype=torch.float32)
     c_edge = torch.tensor(edge_color, device=device, dtype=torch.float32)
     c_chev = torch.tensor(chevron_color, device=device, dtype=torch.float32)
 
     ribbon_col = (
-        c_core[None, :] * (1.0 - 0.5 * edge_glow[:, None])
-        + c_edge[None, :] * (0.65 * edge_glow[:, None])
-        + c_chev[None, :] * (0.85 * chev_band[:, None])
+        c_core[None, :] * (1.0 - center_sheen[:, None])
+        + c_edge[None, :] * center_sheen[:, None]
+        + c_chev[None, :] * (0.75 * chev_band[:, None])
     ).clamp(0.0, 1.0)
 
     out = rgb_hwc.clone().float()
     orig_pix = out[cand_mask]
-    # Soft screen-like luminous blend so asphalt lane markings still show through cleanly
-    blended = orig_pix * (1.0 - alpha[:, None] * 0.72) + ribbon_col * alpha[:, None]
+    # Clean translucent electric-blue blend matching Tesla FSD v15 road carpet
+    blended = orig_pix * (1.0 - alpha[:, None] * 0.80) + ribbon_col * alpha[:, None]
     out[cand_mask] = blended.clamp(0.0, 1.0)
     return out.to(dtype=rgb_hwc.dtype)
 

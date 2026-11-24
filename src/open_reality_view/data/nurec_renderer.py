@@ -387,6 +387,71 @@ class NuRecSceneRenderer:
         )
 
     @torch.no_grad()
+    def composite_ego_and_trajectory(
+        self,
+        bg_rgb_hwc: torch.Tensor,
+        bg_depth_hw: torch.Tensor,
+        bg_alpha_hw: torch.Tensor,
+        timestamp_us: float,
+        T_cam_rig: torch.Tensor,
+        intrinsics: torch.Tensor,
+        *,
+        composite_ego: bool = True,
+        draw_trajectory: bool = False,
+        display_clarity: bool = False,
+    ) -> GaussianRenderOutput:
+        """Composite native-resolution 4x MSAA PBR ego car & Tesla path ribbon onto a refined background.
+
+        Running Difix3D+ on the pure 3DGS background *before* compositing the 4x MSAA PBR ego car
+        prevents SD-Turbo's 8x VAE from softening the ego car's reflections, panel seams, and wheels.
+        """
+        rgb = bg_rgb_hwc.float()
+        depth = bg_depth_hw.float()
+        alpha = bg_alpha_hw.float()
+
+        if display_clarity:
+            # Subtle unsharp clarity + gentle S-curve contrast matching bright automotive displays
+            chw = rgb.permute(2, 0, 1).unsqueeze(0)
+            blur = F.avg_pool2d(chw, kernel_size=3, stride=1, padding=1)
+            sharp = (chw + 0.35 * (chw - blur)).clamp(0.0, 1.0)
+            # Mild midtone contrast lift while preserving highlights & deep shadows
+            curved = (sharp + 0.08 * torch.sin(math.pi * sharp) - 0.04 * torch.sin(2.0 * math.pi * sharp)).clamp(0.0, 1.0)
+            rgb = curved[0].permute(1, 2, 0).contiguous()
+
+        T_rig_nurec = self.rig_to_nurec(timestamp_us)
+        T_cam_rig_dev = T_cam_rig.to(device=self.device, dtype=torch.float32)
+
+        if composite_ego:
+            proj = ProjectionResult(
+                coarse_rgb=rgb.permute(2, 0, 1).unsqueeze(0),
+                hole_mask=(alpha < 0.05).float().unsqueeze(0).unsqueeze(0),
+                target_depth=depth.unsqueeze(0).unsqueeze(0),
+            )
+            comp = self.ego_compositor(
+                proj,
+                intrinsics.unsqueeze(0),
+                T_cam_rig_dev.unsqueeze(0),
+                skybox_textures=self.skybox,
+                T_rig_world=T_rig_nurec,
+            )
+            rgb = comp.coarse_rgb[0].permute(1, 2, 0)
+            depth = comp.target_depth[0, 0]
+            alpha = (comp.hole_mask[0, 0] < 0.5).float()
+
+        if draw_trajectory:
+            waypoints = self.future_ego_waypoints(timestamp_us)
+            rgb = composite_trajectory_ribbon(
+                rgb,
+                depth,
+                intrinsics,
+                T_cam_rig_dev,
+                waypoints,
+                start_x_m=self.ego_centroid[0] + self.ego_dim_lwh[0] * 0.5 + 0.35,
+                phase_sec=timestamp_us * 1e-6,
+            )
+        return GaussianRenderOutput(rgb=rgb.clamp(0.0, 1.0), depth=depth, alpha=alpha)
+
+    @torch.no_grad()
     def render_camera(
         self,
         timestamp_us: float,

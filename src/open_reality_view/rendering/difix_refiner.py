@@ -230,7 +230,7 @@ class Difix3DRefiner(nn.Module):
         ref_rgb_hwc: torch.Tensor | None = None,
         *,
         timestep: int = 199,
-        process_hw: tuple[int, int] | None = (576, 1024),
+        process_hw: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         """Run single-step Difix3D+ refinement on ``novel_rgb_hwc [H, W, 3]`` in ``[0, 1]``.
 
@@ -239,7 +239,8 @@ class Difix3DRefiner(nn.Module):
             ref_rgb_hwc: Optional sharp original camera view ``[H_r, W_r, 3]`` in ``[0, 1]`` for
                 cross-view texture conditioning (recommended for ``nvidia/difix_ref``).
             timestep: Single-step denoising noise level (official Difix3D+ uses ``199``).
-            process_hw: Optional internal resolution (official Difix3D+ native is ``(576, 1024)``).
+            process_hw: Optional internal resolution; ``None`` runs natively at the input's
+                8-pixel-aligned resolution (e.g., ``720x1280`` with zero downscale roundtrip blur).
 
         Returns:
             Refined RGB tensor ``[H, W, 3]`` in ``[0, 1]`` at the original input resolution.
@@ -254,7 +255,8 @@ class Difix3DRefiner(nn.Module):
 
         if ref_rgb_hwc is not None:
             ref = ref_rgb_hwc.to(device=self.device, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
-            ref = F.interpolate(ref, size=(work_h, work_w), mode="bilinear", align_corners=False)
+            if (ref.shape[-2], ref.shape[-1]) != (work_h, work_w):
+                ref = F.interpolate(ref, size=(work_h, work_w), mode="bilinear", align_corners=False)
             ref_m11 = (ref * 2.0 - 1.0).to(dtype=self.dtype)
             model_img = torch.cat([img_m11, ref_m11], dim=0)  # [2, 3, H, W]
             self._active_num_views = 2
