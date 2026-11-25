@@ -102,7 +102,7 @@ flowchart LR
 ### 演进式架构策略（v1 → v2）
 我们的 Branch A 接口只约定输出 `(coarse_rgb, hole_mask, target_depth)`：
 - **v1（当前务实落地）**：走 **流派二**（`DA3 + Temporal3DCache` + `Alpamayo2-Edge` + `Wan2.1-VACE`），低算力快速跑出高清效果。
-- **v2（平滑切换至流派四）**：已于本地 RTX 3080 20GB 实测跑通 **`nvidia/instant-nurec`**（见第 6 节），可直接**热插拔替换 Branch A 的点云缓存**，并结合 `Causal-Forcing` 1–2 步蒸馏实现车端级实时流式渲染。
+- **v2（平滑切换至流派四）**：已于本地 RTX 3080 20GB 实测跑通 **`nvidia/instant-nurec`**（见第 5 节），可直接**热插拔替换 Branch A 的点云缓存**，并结合 `Causal-Forcing` 1–2 步蒸馏实现车端级实时流式渲染。
 
 ---
 
@@ -110,20 +110,77 @@ flowchart LR
 
 | 模型（Hugging Face ID，均已实测 `gated=False`） | 参数量 / 权重体积 | 本地 RTX 3080 20GB 实测可行性 | 工程定位 |
 | :--- | :---: | :--- | :--- |
-| **`nvidia/instant-nurec`** (`pa-multiview`) 🔥 | `202M` / **`0.68 GB`** | **✅ 已实测跑通！**<br>• 5路×6帧 (30图)：**`867 ms` / 显存增量 `3.86 GB`**，覆盖率 **`95.5%`**<br>• 5路×12帧 (60图)：**`1.73 s` / 显存增量 `6.81 GB`**，覆盖率 **`96.1%`**<br>• 免费自带 5 类语义分割 + 观测天空盒 | **超级 Branch A 底座候选**（从 DA3 满屏黑洞跃升至 `96.1%` 完整 3DGS 半成品）；也可用于将普通多相机视频秒级转成 3DGS 扩充数据源 |
+| **`nvidia/instant-nurec`** (`pa-multiview`) 🔥 | `202M` / **`0.68 GB`** | **✅ 已实测跑通！**<br>• 5路×6帧 (30图)：**`867 ms` / 显存增量 `3.86 GB`**，覆盖率 **`95.5%`**<br>• 5路×12帧 (60图)：**`1.73 s` / 显存增量 `6.81 GB`**，覆盖率 **`96.1%`**<br>• 免费自带 5 类语义分割 + 观测天空盒 | **超级 Branch A 底座候选**（从 DA3 满屏黑洞跃升至 `96.1%` 完整 3DGS 半成品）；不可直接替代离线 GT |
 | **`nvidia/GEN3C-Cosmos-7B`** | `7B` / `26.96 GB` | **❌ 3080 跑不动**（全卸载仍需 `~43 GB VRAM`，需 A100/H100 80GB） | 留到 Colab A100 80GB 阶段作为离线视频级精修 Teacher 对比 `Difix3D+` |
 | **`depth-anything/DA3-GIANT-1.1`** / **`tencent/HY-World-2.0`** | ~1.2B | 可评估 | 通用静态 3D 重建强，动态车辆拆分不如 `Instant-NuRec` 专业 |
 | **`KlingTeam/ReCamMaster-Wan2.1`** / **`TrajectoryCrafter`** | 1.3B–5B | 单目转视角 | 盲区易幻觉，不适合直接造自动驾驶 GT；`ReCamMaster-Wan2.1` 相机控制注入设计可参考 |
 
-### `Instant-NuRec` 零离线地图 / 零训练实测核心结论
+### `Instant-NuRec` 零离线地图 / 零训练实测核心结论（客观像素级复盘）
 - **实测方法**：仅输入 5 路因果环视图像（`504×280`，全为当前与过去帧，零离线 3D 地图、零未来帧），经 `Instant-NuRec` (`pa-multiview`) 现场生成 3D 高斯 → `triton_3dgs.py` 渲染 720p → `Difix3D+` 单步精修 → 后置 4× MSAA PBR 自车与蓝毯。
-- **关键观察**：
-  1. 主车道、双黄线、树木、红木围墙、前方 SUV 刹车灯及蓝毯轨迹在**零训练、零离线地图**下已逼近 70 分钟离线 NuRec 真值；
-  2. 右下角近处路边停放车辆因 `504×280` 边缘畸变在原始 3DGS 中轻微变形，未微调的通用 `Difix3D+` 无法依据 6 路高清原图纠偏——**恰好验证了“用 `Instant-NuRec` 做第 1 棒几何底座 + 用离线 `NuRec 26.10 GT` 微调 `Alpamayo + Wan2.1-VACE` 做第 2 棒语义纠偏精修”的黄金组合**。
+- **客观差距（零训练 `Instant-NuRec + Difix3D+` ≈ 55–60 分 vs 离线 `NuRec 26.10 + Difix3D+` ≈ 85–90 分）**：
+  1. **主车道大结构极稳**：自车周边主车道、双黄线、绿色自行车道、红木围墙下半段及紧邻前车 SUV 位置严丝合缝无漂移；
+  2. **四大明显短板**：① 右下角路边停靠银车出现断裂变形（`504×280` 边缘畸变 + 过滤 `MOVABLE` 误伤静止车）；② 右上角大棕榈树几乎消失且天空边缘带冷灰锯齿；③ 左侧一排白色防撞小立柱全部糊没；④ 前车上方远景路口发雾；
+  3. **三条铁律结论**：**❌ 绝不能用 `Instant-NuRec` 替代离线 `NuRec 26.10` 造 GT**；**❌ 绝不能幻想靠免训练拼装追上特斯拉**；**✅ 它真正赢麻的对象是旧的 DA3 稀疏点云（Branch A），必须后接经高质量 GT 微调过的 `Alpamayo + Wan2.1-VACE` 才能还原旁车/立柱/棕榈树/落日光影**。
 
 ---
 
-## 6. 关键渲染与工程排障记录（已解决）
+## 6. 特斯拉 GT 来源分析与开源“混合多源 GT”配方
+
+### 6.1 特斯拉 FSD v15 Reality View 的 GT 并非单一 3DGS
+特斯拉未公开完整训练数据配方，但综合马斯克与 Ashok Elluswamy 公开披露的信息，其 GT 必然是 **4 种来源混合**：
+1. **自研动态 3DGS / 离线神经场景重建引擎**（Ashok 公开演示过 ~220ms 级动态 3DGS 与离线场景重渲染）；
+2. **云端超大“像素级世界模型”**（马斯克确认车端 ~1B Conditional Mean-Flow 很大程度蒸馏自云端超大世界模型）；
+3. **海量互联网视频预训练**（共享 UVE 底座天然具备航拍、无人机跟拍与车外第三人称先验）；
+4. **百万车队独有的免费真实照片监督**：同路段前后车互拍（后车前视即前车真实第三人称跟拍）+ 单车“时间错位视角”（`t = 0s` 的真实前视画面正好位于 `t = 1.5s` 时车身正后方 10–15 米处）。
+
+### 6.2 开源界最优“混合多源 GT”策略与导出耗时说明
+- **导出耗时澄清**：离线 70 分钟/场景的重建成本已由 **NVIDIA 官方集群提前买单**（1,601 个预重建 `.usdz` 直接存放在 Hugging Face）；我们本机 RTX 3080 仅需下载与渲染，**480×832 17 帧仅 ~30–45 秒/条**（720p ~6.7 秒/帧，A100 仅 ~10–15 秒/条），每个 20 秒场景可切出 3–5 条训练样本。
+- **推荐混合配方（突破单一 3DGS 天花板）**：
+  1. **~70% 主力 — 提纯版 `NuRec 26.10`（纯背景 GT）**：仅选 `PSNR >= 30 dB` 高分场景，纯背景精修、同步 Tesla 黄金构图与多角度采样；
+  2. **~15% 真实光学锐度锚点 — 真实原片视角 + 时间错位前视真图**：从同标定母库 `nvidia/PhysicalAI-Autonomous-Vehicles`（1,700+ 小时真车原片）抽原生未二次渲染帧，强迫模型保持 100% 真实相机锐度与光影；
+  3. **~15% 极端几何补充 — CARLA / UE5 仿真追尾（可叠加 `Cosmos-Transfer` 写实化）**：补足 3DGS 在高俯角（30°–50°）及远景细电线杆/路牌上的先天短板；
+  4. **独立评测尺子**：留出未见路段，并可接入 2026 真实多车/无人机同步跟拍数据集（如 `MV2`）作为终极零重建伪影 Benchmark。
+
+---
+
+## 7. NVIDIA 2026 自动驾驶与 Physical AI 开源全家桶清单（HF 实测核验）
+
+以下资产均通过 Hugging Face API 实测确认存在并核验权限与用途：
+
+### 7.1 自动驾驶 VLA 感知与决策大脑（Alpamayo 家族）
+| 仓库 ID | 状态 | 核心能力与对本项目价值 |
+| :--- | :---: | :--- |
+| **`nvidia/Alpamayo2-Edge`** | ✅ 已集成 | 2.65B 车端轻量 VLA，0.41B SigLIP2 视觉塔（0.78GB）作为我们的共享 UVE，自带 64 点规划头 |
+| `nvidia/Alpamayo-1.5-10B` / `Alpamayo2-Super` / `Alpamayo-R1-10B` | 参考 | 10B+ 带 Chain-of-Causation 因果思维链推理的智驾教师大模型 |
+
+### 7.2 3D 驾驶场景重建、资产与渲染（NuRec 家族）
+| 仓库 ID / GitHub | 状态 | 核心能力与对本项目价值 |
+| :--- | :---: | :--- |
+| **`nvidia/PhysicalAI-Autonomous-Vehicles-NuRec`** | ✅ 已集成 | 1,601 个离线精建 20s 7 相机+LiDAR 3DGS 场景（`.usdz`），Stage 0 GT 主力底座 |
+| **`nvidia/PhysicalAI-Autonomous-Vehicles`** | 🔥 高价值 | **1,700+ 小时真车原始视频 + LiDAR 母库**，与 NuRec/Alpamayo 完全同标定，做真实光学监督零适配成本 |
+| **`nvidia/instant-nurec`** (`github.com/NVIDIA/instant-nurec`) | ✅ 已实测 | 202M（0.68GB）前馈 3DGS，RTX 3080 上 867ms 现场生成 95.5% 覆盖率 3D 沙盘 |
+| **`nvidia/difix_ref`** / `nvidia/difix` | ✅ 已集成 | 单步 3DGS 去伪影修图器（720p ~850ms，6.8GB 显存） |
+| `NVlabs/alpasim` & `NVIDIA/3DGRUT` | 参考 | NVIDIA 官方 gRPC 微服务闭环驾驶仿真框架 + 3DGUT 底层渲染重建代码 |
+| `nvidia/PhysicalAI-NuRec-PPISP` / `NuRec-AV-Object-Benchmark` | 参考 | 物理相机曝光/暗角/白平衡 ISP 校正模块 & 动态物体插入评测集 |
+
+### 7.3 自动驾驶世界模型与实时少步渲染器（Cosmos 2.5 / Cosmos 3 / OmniDreams）
+| 仓库 ID / GitHub | 权限 / 体量 | 核心能力与对本项目价值 |
+| :--- | :---: | :--- |
+| **`nvidia/omni-dreams-models`** (`nv-tlabs/omni-dreams`) 🔥🔥 | `gated=auto` / 34.5 GB | **实时闭环自动驾驶世界模型**（基于 `Cosmos-Predict2.5-2B`），已放出 **`2b_res720p_30fps_i2v_hdmap_distilled.pt`**（2B 因果蒸馏至 **720p @ 30 FPS 实时吐帧**，20s 长时序），是 v2 实时化架构的最佳开源教科书 |
+| **`nvidia/Cosmos3-Nano-Sim-Transfer`** 🔥🔥 | `gated=False` / 29.7 GB | **2026 Cosmos 3 因果蒸馏少步 Sim2Real 渲染器**，吃 `depth + segmentation + edge + blur` 几步出照片级连续视频；既可把 CARLA/UE5 追尾变成照片级 GT，也值得测试直接精修 `NuRec / Instant-NuRec` 模糊视频 |
+| **`nvidia/Cosmos3-Nano-Transfer-Auto`** 🔥 | `gated=False` / 32.1 GB | 自动驾驶专用多视角控制生成，支持最多 **11 路同步鱼眼/标准相机 + LiDAR**，适合晴/雨/夜极端天气数据扩增 |
+| **`nvidia/Cosmos-Transfer2.5-2B`** & **`Cosmos-Predict2.5-2B` / `14B`** | `gated=auto` | 2B 轻量版含 `auto/multiview` 驾驶权重及 `distilled` 少步版本，适合多视角 Sim2Real 与数据扩增 |
+| `nvidia/PhysicalAI-Autonomous-Vehicle-Cosmos-Drive-Dreams` | `gated=False` | 公开合成多视角驾驶视频数据集 |
+
+### 7.4 通用 3D 世界生成与相机控制
+| 仓库 ID | 权限 / 体量 | 核心能力与对本项目价值 |
+| :--- | :---: | :--- |
+| **`nvidia/GEN3C-Cosmos-7B`** | `gated=False` / 27.0 GB | 7B 级 3D Cache 相机可控视频模型（43GB 显存），留作 Colab A100 80GB 离线视频精修 Teacher 备选 |
+| `nvidia/Lyra-2.0` (`arXiv:2604.13036`) | `gated=False` / 91.6 GB | 单图长程可探索 3D 世界生成，其用逐帧 3D 几何做历史帧路由以消除“空间遗忘”的思想值得长期关注 |
+
+---
+
+## 8. 关键渲染与工程排障记录（已解决）
 
 1. **NuRec 时序傅里叶 Albedo 发灰洗白**（commit `a3adc4b`）
    - 根因：NuRec 26.10 `features_albedo` 形状为 `[N, K, 3]`，索引 `0` 为常值 DC 基色，`1..K-1` 为零均值时序谐波（对静态/部分动态体为 0）；此前取 `mean(dim=1)` 导致颜色被衰减 5×–20×。
