@@ -39,3 +39,6 @@ venv/
 .idea/
 .DS_Store
 *.log
+
+# Third-party research code (cloned, not vendored)
+/third_party/

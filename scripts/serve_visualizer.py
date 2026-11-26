@@ -46,6 +46,9 @@ ALT_HIGHWAY_USDZ = (
     "3582a449-6e1a-4dca-8c53-efc49a623b88/3582a449-6e1a-4dca-8c53-efc49a623b88.usdz"
 )
 
+# Cosmos-Transfer2.5 vs Difix3D+ experiment artifacts (scripts/exp_cosmos_transfer_refine.py), shown in tab 7
+EXP_DIR = (Path(__file__).resolve().parents[1] / "outputs" / "exp_cosmos_transfer").resolve()
+
 # Tesla FSD v15 drone follow-cam defaults: ~28% sky/horizon visible + full uncropped ego car at bottom-center
 TESLA_CHASE_RADIUS = 13.8
 TESLA_CHASE_ELEV_DEG = 11.5
@@ -164,6 +167,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
     font-size: 14px; font-weight: 600; transition: all 0.15s;
   }
   .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .exp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
+  .exp-toolbar select, .exp-toolbar button {
+    background: #182136; color: #fff; border: 1px solid #304166; border-radius: 6px; padding: 5px 10px; font-size: 13px;
+  }
+  .exp-toolbar button { cursor: pointer; font-weight: 600; }
+  .exp-videos { display: flex; flex-wrap: wrap; gap: 12px; }
+  .exp-vid { position: relative; flex: 1 1 420px; min-width: 0; }
+  .exp-vid video { width: 100%; display: block; border-radius: 10px; border: 1px solid var(--border); background: #000; }
+  .exp-table-wrap { overflow-x: auto; margin: 16px 0; }
+  .exp-table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .exp-table th, .exp-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+  .exp-table th:first-child, .exp-table td:first-child { text-align: left; }
+  .exp-table th { color: var(--muted); font-weight: 600; }
+  .exp-notes { font-size: 13px; line-height: 1.7; color: #cbd5e1; background: #0c101b; border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; }
+  .exp-notes li { margin-left: 18px; }
   .section { display: none; }
   .section.active { display: block; }
   .card {
@@ -250,6 +268,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div class="tab" onclick="switchTab('orbit', this)">4. 实时 360° 自由视角（支持 720p / 1080p）</div>
     <div class="tab" onclick="switchTab('compare_front', this)">5. 前视原图 vs 自研3DGS</div>
     <div class="tab" onclick="switchTab('benchmarks', this)">6. v1 显存与实测指标</div>
+    <div class="tab" onclick="switchTab('cosmos_exp', this)">🧪 7. Cosmos vs Difix 视频级精修实验</div>
   </div>
 
   <!-- SECTION 0 (DEFAULT): 720p HD TESLA-ALIGNED CURTAIN -->
@@ -464,6 +483,32 @@ HTML_PAGE = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
+
+  <!-- SECTION 7: COSMOS-TRANSFER2.5 vs DIFIX3D+ EXPERIMENT -->
+  <div id="sec-cosmos_exp" class="section">
+    <div class="card">
+      <h2><span>Cosmos-Transfer2.5-2B 整段视频精修 vs Difix3D+ 逐帧精修（同一 NuRec 追尾视角 · RTX 3080 实测）</span></h2>
+      <div class="exp-toolbar">
+        实验 <select id="expRun" onchange="loadExpRun()">
+          <option value="bb5389f1_f93">93 帧（官方要求长度）✅</option>
+          <option value="bb5389f1">29 帧（片段过短 → 条纹失败）❌</option>
+        </select>
+        左 <select id="expLeft" onchange="setExpSources()"></select>
+        右 <select id="expRight" onchange="setExpSources()"></select>
+        <button id="expPlayBtn" onclick="expTogglePlay()">▶ 同步播放</button>
+        <input type="range" id="expSeek" min="0" max="1000" value="0" style="flex:1; min-width:120px" oninput="expSeekTo(this.value)" />
+        <span id="expTime" style="min-width:90px">0.00 s</span>
+      </div>
+      <div class="exp-videos">
+        <div class="exp-vid"><video id="expVidL" muted playsinline loop preload="auto"></video><div class="imglabel" id="expLabelL" style="top:10px; left:10px"></div></div>
+        <div class="exp-vid"><video id="expVidR" muted playsinline loop preload="auto"></video><div class="imglabel" id="expLabelR" style="top:10px; left:10px"></div></div>
+      </div>
+      <div class="exp-table-wrap"><table class="exp-table" id="expTable"></table></div>
+      <div class="exp-notes" id="expNotes"></div>
+      <h2 style="margin-top:18px"><span>对比总图（自上而下：各方法 · 自左而右：首帧 / 中间帧 / 尾帧）</span></h2>
+      <img id="expGrid" alt="comparison grid" style="width:100%; border-radius:10px; border:1px solid var(--border)" />
+    </div>
+  </div>
 </div>
 
 <script>
@@ -498,7 +543,105 @@ function switchTab(name, el) {
   el.classList.add('active');
   document.getElementById('sec-' + name).classList.add('active');
   syncCompareWidths();
+  if (name === 'cosmos_exp' && !expMetrics) loadExpRun();
 }
+
+// ---------------- Tab 7: Cosmos vs Difix experiment (files from outputs/exp_cosmos_transfer/) ----------------
+const EXP_LABELS = {
+  'raw': '原始 NuRec 3DGS 渲染',
+  'difix': 'Difix3D+ 逐帧精修',
+  'cosmos_blur_low_w0.5': 'Cosmos-Transfer2.5（官方默认设置）',
+  'cosmos_blur_low_w1_negempty': 'Cosmos 第一轮（负面提示为空 · 权重 1.0）',
+  'artifixer_1.3b': 'ArtiFixer-1.3B（相机尺度 1.0 · 失败：58 m 轨迹超出训练分布）',
+  'artifixer_1.3b_s0.03': 'ArtiFixer-1.3B（相机尺度 0.03）',
+  'artifixer_1.3b_s0.05': 'ArtiFixer-1.3B（相机尺度 0.05）',
+  'artifixer_1.3b_s0.1': 'ArtiFixer-1.3B（相机尺度 0.1 · 推荐）',
+  'artifixer_1.3b_s0.2': 'ArtiFixer-1.3B（相机尺度 0.2）',
+  'harmonizer_temporal': 'Harmonizer（时序单步）',
+  'harmonizer_nontemporal': 'Harmonizer（逐帧单步）',
+  'fixer': 'Fixer（Difix V2 · Cosmos 0.6B）',
+};
+const EXP_NOTES = {
+  'bb5389f1_f93': `<b>六方对比结论（2026-11-26，RTX 3080，同一 93 帧追尾片段）：</b><ul>
+    <li>🏆 <b>Harmonizer（时序）时序最稳</b>：三项闪烁指标全场最低，甚至低于原始渲染；天空中的 3DGS 黑色漂浮物被去除，光照更统一。代价是画面略软、少量细节被重绘（保真度 29.4 dB）。约 1.7 s/帧。</li>
+    <li>Fixer / Harmonizer（逐帧）：最贴近原图（保真度约 32.7 dB），闪烁与原始渲染相当，比 Difix 稳；漂浮物只部分去除。约 0.3–0.6 s/帧，全场最快。</li>
+    <li>ArtiFixer-1.3B：<b>必须把相机尺度设为 0.1</b>（默认 1.0 时 58 m 轨迹超出训练分布，画面整体崩坏，保真度 19 dB）；0.03–0.1 区间效果相近（约 25 dB），0.1 时序最稳。仍有重影（左侧白车），漂浮物保留。约 2.2 s/帧。</li>
+    <li>Cosmos-Transfer2.5：纹理最丰富，但会产生幻觉（白车被改形）、闪烁最高，且约 36 s/帧。</li></ul>
+    <b>此前 Cosmos 93 帧结论：</b><ul>
+    <li>✅ 条纹/斑马纹完全消失 —— 根因是之前片段过短；Transfer2.5 必须按 93 帧整块生成。</li>
+    <li>✅ 画质最接近照片：路面沥青纹理、自行车道绿色标线与图标、路缘、消防栓清晰；远景 3DGS 雾团被重绘为合理建筑/树木。</li>
+    <li>✅ 低频时序更稳：σ6 低通闪烁 ≈ 原始渲染，低于 Difix；原分辨率闪烁偏高来自新增高频纹理，请对比播放观察是否“纹理沸腾”。</li>
+    <li>⚠️ 轻度幻觉：保真度低于 Difix 约 1.8 dB，远处车辆与原伪影区域（如棕榈树根部蓝色残影）被重新解释。</li>
+    <li>❌ 太慢：RTX 3080 上约 36 s/帧（Difix 约 1.9 s/帧），只适合大卡离线精修高质量 GT。</li></ul>`,
+  'bb5389f1': `<b>29 帧结论（失败对照）：</b><ul>
+    <li>❌ 两组 Cosmos 输出均为满屏笔刷/斑马纹，比原始渲染更差；关闭 CFG 的 17 帧诊断同样失败。</li>
+    <li>“清晰度”数值虚高（732 / 2031）完全来自条纹伪影 —— 该指标必须结合画面判断。</li>
+    <li>排除项：VAE 分块解码（平均像素差 0.0017）、负面提示、CFG；根因在 93 帧实验中确认为片段过短。</li></ul>`,
+};
+let expMetrics = null;
+let expSyncing = false;
+
+function expFmt(v, d) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(d); }
+
+async function loadExpRun() {
+  const run = document.getElementById('expRun').value;
+  const txt = await (await fetch(`/exp/${run}/metrics.json`)).text();
+  expMetrics = JSON.parse(txt.replace(/\bInfinity\b/g, 'null'));
+  const methods = Object.keys(expMetrics);
+  const fill = (id, def) => {
+    const sel = document.getElementById(id);
+    sel.innerHTML = methods.map(m => `<option value="${m}">${EXP_LABELS[m] || m}</option>`).join('');
+    sel.value = methods.includes(def) ? def : methods[0];
+  };
+  fill('expLeft', 'difix');
+  fill('expRight', methods.includes('harmonizer_temporal') ? 'harmonizer_temporal' : 'cosmos_blur_low_w0.5');
+  const rows = methods.map(m => {
+    const r = expMetrics[m];
+    return `<tr><td>${EXP_LABELS[m] || m}</td><td>${expFmt(r.flicker, 2)}</td><td>${expFmt(r.flicker_lowpass_s2, 2)}</td>`
+      + `<td>${expFmt(r.flicker_lowpass_s6, 2)}</td><td>${expFmt(r.fidelity_psnr_lowpass, 1)}</td><td>${expFmt(r.sharpness_lap_var, 0)}</td></tr>`;
+  }).join('');
+  document.getElementById('expTable').innerHTML =
+    '<tr><th>方法</th><th>闪烁 ↓（原分辨率）</th><th>闪烁 ↓（σ2 低通）</th><th>闪烁 ↓（σ6 低通）</th><th>结构保真 dB ↑</th><th>清晰度（拉普拉斯方差）</th></tr>' + rows;
+  document.getElementById('expNotes').innerHTML = EXP_NOTES[run] || '';
+  document.getElementById('expGrid').src = `/exp/${run}/comparison_grid.jpg`;
+  setExpSources();
+}
+
+function setExpSources() {
+  const run = document.getElementById('expRun').value;
+  const L = document.getElementById('expVidL'), R = document.getElementById('expVidR');
+  const l = document.getElementById('expLeft').value, r = document.getElementById('expRight').value;
+  L.src = `/exp/${run}/video_${l}.mp4`; R.src = `/exp/${run}/video_${r}.mp4`;
+  document.getElementById('expLabelL').textContent = EXP_LABELS[l] || l;
+  document.getElementById('expLabelR').textContent = EXP_LABELS[r] || r;
+  document.getElementById('expPlayBtn').textContent = '▶ 同步播放';
+  L.load(); R.load();
+}
+
+function expTogglePlay() {
+  const L = document.getElementById('expVidL'), R = document.getElementById('expVidR');
+  const btn = document.getElementById('expPlayBtn');
+  if (L.paused) { R.currentTime = L.currentTime; L.play(); R.play(); btn.textContent = '⏸ 暂停'; }
+  else { L.pause(); R.pause(); btn.textContent = '▶ 同步播放'; }
+}
+
+function expSeekTo(v) {
+  const L = document.getElementById('expVidL'), R = document.getElementById('expVidR');
+  if (!L.duration) return;
+  const t = (v / 1000) * L.duration;
+  L.currentTime = t; R.currentTime = t;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const L = document.getElementById('expVidL'), R = document.getElementById('expVidR');
+  L.addEventListener('timeupdate', () => {
+    if (L.duration) {
+      document.getElementById('expSeek').value = Math.round(1000 * L.currentTime / L.duration);
+      document.getElementById('expTime').textContent = `${L.currentTime.toFixed(2)} / ${L.duration.toFixed(2)} s`;
+    }
+    if (!L.paused && Math.abs(R.currentTime - L.currentTime) > 0.08) R.currentTime = L.currentTime;
+  });
+});
 
 function pad4(n) { return String(n).padStart(4, '0'); }
 
@@ -1035,6 +1178,50 @@ def main() -> None:
             self.end_headers()
             self.wfile.write(payload)
 
+        def _send_exp_file(self, rel: str) -> None:
+            """Serve experiment artifacts from outputs/exp_cosmos_transfer/ with byte-range support."""
+            ctypes = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json"}
+            fpath = (EXP_DIR / rel).resolve()
+            if fpath.suffix not in ctypes or EXP_DIR not in fpath.parents or not fpath.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            size = fpath.stat().st_size
+            start, end = 0, size - 1
+            rng = self.headers.get("Range", "")
+            partial = rng.startswith("bytes=")
+            if partial:
+                a, _, b = rng[len("bytes=") :].split(",")[0].partition("-")
+                if a:
+                    start, end = int(a), (int(b) if b else size - 1)
+                else:  # suffix range: last N bytes
+                    start = max(0, size - int(b))
+                end = min(end, size - 1)
+                if start > end:
+                    self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+            try:
+                self.send_response(HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK)
+                self.send_header("Content-Type", ctypes[fpath.suffix])
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(end - start + 1))
+                if partial:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with fpath.open("rb") as f:
+                    f.seek(start)
+                    remaining = end - start + 1
+                    while remaining > 0:
+                        buf = f.read(min(1 << 20, remaining))
+                        if not buf:
+                            break
+                        self.wfile.write(buf)
+                        remaining -= len(buf)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # browser aborted a range request while seeking
+
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
@@ -1055,6 +1242,10 @@ def main() -> None:
                     self._send_bytes(fpath.read_bytes(), ctype)
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
+                return
+
+            if path.startswith("/exp/"):
+                self._send_exp_file(urllib.parse.unquote(path[len("/exp/") :]))
                 return
 
             if path == "/api/render":
